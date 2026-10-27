@@ -29,6 +29,13 @@ All notable changes to AgentWall are documented here. The format follows
 
 ### Added
 
+- **Evaluation harness + honest results** (`benchmarks/`, `docs/EVALUATION.md`):
+  compares WAF-only, anomaly-only, challenge-only, the full pipeline, a naive
+  union and ablations on a labelled synthetic stream. The results are negative
+  for two common claims: no measured false-positive/latency advantage at equal
+  cost, and no super-additive combination. The document specifies formulas,
+  state, transition rules, metrics, threats to validity and the experiments
+  needed to make stronger claims.
 - README now documents the detection model explicitly: `river`'s
   **HalfSpaceTrees** (Half-Space Trees) — why it is unsupervised/streaming, the
   score-then-learn pipeline, geometry flags (`--hst-trees/--hst-height/--hst-window`),

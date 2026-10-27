@@ -1,0 +1,210 @@
+{
+  "generated_at": "2026-10-27T22:59:12.518578+00:00",
+  "python": "3.9.6",
+  "events": 41395,
+  "baseline_events": 6000,
+  "results": {
+    "waf-only": {
+      "fp": 0,
+      "benign": 870,
+      "detected": 45,
+      "attack": 190,
+      "fp_rate": 0.0,
+      "recall": 0.23684210526315788,
+      "median_latency": 9,
+      "seconds": 0.15571424999999994,
+      "ms_per_10k": 37.616680758545705,
+      "challenged_benign": 0
+    },
+    "anomaly-only": {
+      "fp": 0,
+      "benign": 870,
+      "detected": 36,
+      "attack": 190,
+      "fp_rate": 0.0,
+      "recall": 0.18947368421052632,
+      "median_latency": 25.5,
+      "seconds": 3.815650166000001,
+      "ms_per_10k": 921.765953859162,
+      "challenged_benign": 0
+    },
+    "challenge-only": {
+      "fp": 0,
+      "benign": 870,
+      "detected": 145,
+      "attack": 190,
+      "fp_rate": 0.0,
+      "recall": 0.7631578947368421,
+      "median_latency": 1,
+      "seconds": 0.00866962499999957,
+      "ms_per_10k": 2.094365261504909,
+      "challenged_benign": 870
+    },
+    "agentwall-full": {
+      "fp": 0,
+      "benign": 870,
+      "detected": 45,
+      "attack": 190,
+      "fp_rate": 0.0,
+      "recall": 0.23684210526315788,
+      "median_latency": 9,
+      "seconds": 3.9031621249999997,
+      "ms_per_10k": 942.9066614325402,
+      "challenged_benign": 0
+    },
+    "agentwall-full-challenge-at-watch": {
+      "fp": 0,
+      "benign": 870,
+      "detected": 46,
+      "attack": 190,
+      "fp_rate": 0.0,
+      "recall": 0.24210526315789474,
+      "median_latency": 9.5,
+      "seconds": 3.8100045409999996,
+      "ms_per_10k": 920.402111607682,
+      "challenged_benign": 0
+    },
+    "union-naive": {
+      "fp": 0,
+      "benign": 870,
+      "detected": 152,
+      "attack": 190,
+      "fp_rate": 0.0,
+      "recall": 0.8,
+      "median_latency": 1.0,
+      "seconds": 3.7792298330000023,
+      "ms_per_10k": 912.9677093851919,
+      "challenged_benign": 870
+    },
+    "full-no-human-floor": {
+      "fp": 0,
+      "benign": 870,
+      "detected": 45,
+      "attack": 190,
+      "fp_rate": 0.0,
+      "recall": 0.23684210526315788,
+      "median_latency": 9,
+      "seconds": 3.942494958000001,
+      "ms_per_10k": 952.4084932962921,
+      "challenged_benign": 0
+    },
+    "full-no-hard-signals": {
+      "fp": 0,
+      "benign": 870,
+      "detected": 45,
+      "attack": 190,
+      "fp_rate": 0.0,
+      "recall": 0.23684210526315788,
+      "median_latency": 9,
+      "seconds": 4.144906083000002,
+      "ms_per_10k": 1001.3059748761933,
+      "challenged_benign": 0
+    },
+    "full-no-headless": {
+      "fp": 0,
+      "benign": 870,
+      "detected": 45,
+      "attack": 190,
+      "fp_rate": 0.0,
+      "recall": 0.23684210526315788,
+      "median_latency": 9,
+      "seconds": 4.421741667000003,
+      "ms_per_10k": 1068.1825503080088,
+      "challenged_benign": 0
+    },
+    "full-no-waf": {
+      "fp": 0,
+      "benign": 870,
+      "detected": 32,
+      "attack": 190,
+      "fp_rate": 0.0,
+      "recall": 0.16842105263157894,
+      "median_latency": 16.0,
+      "seconds": 4.198600124999999,
+      "ms_per_10k": 1014.2771168015457,
+      "challenged_benign": 0
+    }
+  },
+  "per_scenario": {
+    "waf-only": {
+      "agentic-http": "25/25",
+      "agentic-stealth": "0/25",
+      "distributed-low-slow": "0/80",
+      "headless-enum": "0/20",
+      "headless-stealth": "0/20",
+      "scanner-fast": "20/20"
+    },
+    "anomaly-only": {
+      "agentic-http": "25/25",
+      "agentic-stealth": "4/25",
+      "distributed-low-slow": "0/80",
+      "headless-enum": "0/20",
+      "headless-stealth": "0/20",
+      "scanner-fast": "7/20"
+    },
+    "challenge-only": {
+      "agentic-http": "25/25",
+      "agentic-stealth": "0/25",
+      "distributed-low-slow": "80/80",
+      "headless-enum": "20/20",
+      "headless-stealth": "0/20",
+      "scanner-fast": "20/20"
+    },
+    "agentwall-full": {
+      "agentic-http": "25/25",
+      "agentic-stealth": "0/25",
+      "distributed-low-slow": "0/80",
+      "headless-enum": "0/20",
+      "headless-stealth": "0/20",
+      "scanner-fast": "20/20"
+    },
+    "agentwall-full-challenge-at-watch": {
+      "agentic-http": "25/25",
+      "agentic-stealth": "0/25",
+      "distributed-low-slow": "0/80",
+      "headless-enum": "1/20",
+      "headless-stealth": "0/20",
+      "scanner-fast": "20/20"
+    },
+    "union-naive": {
+      "agentic-http": "25/25",
+      "agentic-stealth": "7/25",
+      "distributed-low-slow": "80/80",
+      "headless-enum": "20/20",
+      "headless-stealth": "0/20",
+      "scanner-fast": "20/20"
+    },
+    "full-no-human-floor": {
+      "agentic-http": "25/25",
+      "agentic-stealth": "0/25",
+      "distributed-low-slow": "0/80",
+      "headless-enum": "0/20",
+      "headless-stealth": "0/20",
+      "scanner-fast": "20/20"
+    },
+    "full-no-hard-signals": {
+      "agentic-http": "25/25",
+      "agentic-stealth": "0/25",
+      "distributed-low-slow": "0/80",
+      "headless-enum": "0/20",
+      "headless-stealth": "0/20",
+      "scanner-fast": "20/20"
+    },
+    "full-no-headless": {
+      "agentic-http": "25/25",
+      "agentic-stealth": "0/25",
+      "distributed-low-slow": "0/80",
+      "headless-enum": "0/20",
+      "headless-stealth": "0/20",
+      "scanner-fast": "20/20"
+    },
+    "full-no-waf": {
+      "agentic-http": "25/25",
+      "agentic-stealth": "0/25",
+      "distributed-low-slow": "0/80",
+      "headless-enum": "0/20",
+      "headless-stealth": "0/20",
+      "scanner-fast": "7/20"
+    }
+  }
+}

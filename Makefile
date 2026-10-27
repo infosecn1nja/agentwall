@@ -6,7 +6,7 @@
 SHELL := /bin/bash
 PY    ?= python3
 
-.PHONY: help test e2e linux-config preflight lint docker-config clean
+.PHONY: help test e2e linux-config preflight bench lint docker-config clean
 
 help:
 	@echo "AgentWall targets:"
@@ -14,6 +14,7 @@ help:
 	@echo "  make e2e               # real Redis+OpenResty+scorer test (Docker)"
 	@echo "  make linux-config      # systemd/fail2ban/Apache/OpenResty validation (Docker)"
 	@echo "  make preflight         # go-live self-test (defaults to repo config checks)"
+	@echo "  make bench             # controlled synthetic evaluation (WAF/anomaly/challenge/full)"
 	@echo "  make lint              # shell syntax + Python compile check"
 	@echo "  make docker-config     # validate docker-compose.yml"
 	@echo "  make clean             # remove __pycache__ / .pyc"
@@ -29,6 +30,9 @@ linux-config:
 
 preflight:
 	bash deploy/preflight.sh --help
+
+bench:
+	$(PY) benchmarks/agentwall_bench.py
 
 lint:
 	bash -n deploy/preflight.sh deploy/validate-linux.sh deploy/gen-secrets.sh \

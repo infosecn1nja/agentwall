@@ -181,6 +181,11 @@ Redis verdict writes
 Size for peak access-log line rate and shard by client-IP hash before raising
 model complexity. `--once` replays a log once (baseline backfill/benchmarks).
 
+**Controlled evaluation (including negative results):**
+[docs/EVALUATION.md](docs/EVALUATION.md) + [`benchmarks/`](benchmarks/). The
+current benchmark does **not** show a false-positive or latency advantage over a
+WAF, nor a super-additive combination; read it before making claims.
+
 ---
 
 Licensed under the [MIT License](LICENSE) © 2026 AgentWall contributors.
