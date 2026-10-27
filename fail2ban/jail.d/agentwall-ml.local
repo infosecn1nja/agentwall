@@ -1,0 +1,53 @@
+# /etc/fail2ban/jail.d/agentwall-ml.local
+# Manual-ban jail used by the ML scorer. The scorer calls
+#     fail2ban-client set agentwall-ml banip <ip>
+# directly (or `sudo -n fail2ban-client ...` with --fail2ban-sudo). No log line
+# ever needs to match; see filter.d/agentwall-ml.conf for the never-matching filter.
+#
+# maxretry = 9999 is deliberate: even if the filter matched something, this jail
+# must never auto-ban from logs. Bans come only from the scorer.
+#
+# BACKEND/AUTOBAN: keep `backend = auto`; the jail does not need a live log tail
+# for manual bans, but fail2ban still validates/opens the logpath. Point it at
+# the same access log the rest of the stack uses (nginx default, Apache variant
+# commented) — the path must exist and be readable by the fail2ban daemon (root)
+# or the jail fails to start.
+#
+# BANTIME: 1800 == scorer --block-ttl (Redis agentwall:block:* TTL). Keep in sync.
+#
+# IPV6 CAVEAT: the scorer normalizes IPv6 to a /64 NETWORK key for Redis, but
+# for fail2ban it deliberately passes the RAW client address to banip (banning
+# the /64 network address would ban almost nobody). `banip` still bans ONE
+# address, so an attacker rotating inside one /64 evades per-address bans. If
+# your edge must enforce IPv6 properly, prefer --backend redis (the Lua checks
+# the /64 key) or add an explicit ip6tables/nftables rule for the /64. Test:
+#     fail2ban-client set agentwall-ml banip 2001:db8::1
+#     ip6tables -S | grep f2b          # (or: nft list ruleset | grep f2b)
+#     fail2ban-client set agentwall-ml unbanip 2001:db8::1
+#
+# INSTALL: copy this file + filter.d/agentwall-ml.conf, then
+#     fail2ban-client -t && fail2ban-client reload
+#     fail2ban-client status agentwall-ml
+[agentwall-ml]
+enabled   = true
+filter    = agentwall-ml
+backend   = auto
+# nginx (default): /var/log/nginx/agentwall_access.log
+# apache:          /var/log/apache2/agentwall_access.log
+logpath   = /var/log/nginx/agentwall_access.log
+maxretry  = 9999
+findtime  = 10
+# bantime == scorer --block-ttl / Redis TTL; change both together.
+# NOTE: keep `#` comments on their own line — this parser does not strip a
+# trailing `#` from option values (only `;` is an inline comment), so
+# `bantime = 1800  # ...` would be read as a string and the option dropped.
+bantime   = 1800
+bantime.increment = true
+bantime.maxtime   = 1d
+# Manual bans come from the scorer, which already enforces --allowlist. This line
+# is a backstop so an accidental log match can never ban loopback; append your
+# monitoring CIDRs on the same line:
+ignoreip  = 127.0.0.1/8 ::1
+# iptables default; nftables hosts (fail2ban >= 0.11) use:
+#banaction = nftables-multiport
+banaction = iptables-multiport

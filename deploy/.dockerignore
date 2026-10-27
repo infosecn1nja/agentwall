@@ -1,0 +1,17 @@
+# =============================================================================
+# deploy/.dockerignore — NOTE: this file is NOT the one Docker uses.
+# -----------------------------------------------------------------------------
+# The build context is the REPO ROOT (`build.context: ..` in
+# deploy/docker-compose.yml, and `docker build -f deploy/Dockerfile .`), so the
+# authoritative ignore file is the repository-root `/.dockerignore`.
+#
+# Docker only reads `.dockerignore` at the root of the build context, never next
+# to the Dockerfile. This file exists so anyone looking for an ignore file next
+# to deploy/Dockerfile finds this explanation instead of a wrong guess; it is
+# intentionally comment-only (an empty pattern set) and harmless.
+#
+# Do not build with `docker build -f deploy/Dockerfile deploy/`: the Dockerfile
+# COPYs scorer/* from the context, which does not exist under deploy/.
+#
+# See: ../../.dockerignore (repo root)
+# =============================================================================

@@ -1,0 +1,268 @@
+# =============================================================================
+# deploy/nginx.conf.example — complete OpenResty edge config for agentwall
+# -----------------------------------------------------------------------------
+# This is the FULL production nginx.conf (main + http + server contexts), not a
+# snippet. Copy it to the proxy host, edit every `<-- EDIT` marker, install the
+# Lua files from nginx-lua/ into /etc/nginx/lua/, and validate with:
+#
+#   openresty -t -c /etc/nginx/nginx.conf
+#   deploy/validate-linux.sh          # runs this check in a container
+#
+# Request path (order matters):
+#   real_ip (post-read) -> limit_req/limit_conn (preaccess)
+#   -> access_by_lua_file (block 403 / PoW challenge) -> ModSecurity (optional)
+#   -> app_backend
+#
+# The access log below is what the Python scorer and fail2ban consume. Keep the
+# leading fields exactly as they are, and keep `xff="..."` — the scorer needs it
+# when running with --use-xff.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# MAIN CONTEXT: pass the Lua layer's configuration through to workers.
+# nginx strips environment variables it does not know about, so every AGENTWALL_*
+# variable the Lua reads MUST be declared here. Values are inherited from the
+# nginx service environment (systemd EnvironmentFile=...), e.g.
+#   /etc/agentwall-nginx.env
+#     AGENTWALL_REDIS_HOST=127.0.0.1
+#     AGENTWALL_REDIS_PASS=...
+#     AGENTWALL_CHAL_SECRET=...
+# Use `env NAME=value;` instead to hard-code a value in this file (reload is
+# enough for that; inherited values need a full restart).
+# ---------------------------------------------------------------------------
+env AGENTWALL_REDIS_HOST;
+env AGENTWALL_REDIS_PORT;
+env AGENTWALL_REDIS_PASS;
+env AGENTWALL_REDIS_DB;
+env AGENTWALL_REDIS_TIMEOUT_MS;
+env AGENTWALL_IPV6_PREFIX;
+env AGENTWALL_CHAL_SECRET;
+env AGENTWALL_POW_DIFF;
+env AGENTWALL_CHAL_TTL;
+env AGENTWALL_CLR_TTL;
+env AGENTWALL_HEADLESS_MODE;
+env AGENTWALL_HEADLESS_TTL;
+env AGENTWALL_HEADLESS_BLOCK;
+env AGENTWALL_HEADLESS_SUSPECT;
+env AGENTWALL_MIN_SOLVE_MS;
+
+worker_processes auto;
+worker_rlimit_nofile 65535;
+error_log /var/log/nginx/error.log warn;
+pid /run/nginx.pid;
+
+events {
+    worker_connections 16384;
+    multi_accept on;
+}
+
+http {
+    include       /usr/local/openresty/nginx/conf/mime.types;
+    default_type  application/octet-stream;
+
+    # --- basic hygiene ------------------------------------------------------
+    server_tokens off;
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 30s;
+
+    # Slowloris / slow-body protection (same values as waf/nginx-agentwall.conf)
+    client_body_timeout   10s;
+    client_header_timeout 10s;
+    send_timeout          10s;
+    client_max_body_size  8m;          # <-- EDIT to your app's real limit
+
+    # ---------------------------------------------------------------------
+    # DNS used by lua-resty-redis (when AGENTWALL_REDIS_HOST is a hostname) and by
+    # any hostname-based upstream. 127.0.0.53 = systemd-resolved; 127.0.0.11 =
+    # Docker's embedded DNS. EDIT to your resolver(s).
+    # ---------------------------------------------------------------------
+    resolver 127.0.0.53 valid=30s ipv6=off;   # <-- EDIT
+    resolver_timeout 2s;
+
+    # --- agentwall Lua layer ----------------------------------------------------
+    lua_package_path "/etc/nginx/lua/?.lua;;";
+    # Cache for block/challenge lookups and rate-limited error logging.
+    # 10m holds roughly 50k keys; size to (block + challenge + chal ids) * IPs.
+    lua_shared_dict agentwall_cache 10m;
+    lua_socket_log_errors off;
+
+    # --- rate / connection zones (16 MB per 100k distinct IPs roughly) ------
+    limit_req_zone  $binary_remote_addr zone=agentwall_general:32m rate=15r/s;
+    limit_req_zone  $binary_remote_addr zone=agentwall_auth:32m    rate=5r/m;
+    limit_conn_zone $binary_remote_addr zone=agentwall_conn:32m;
+    limit_req_status  429;             # fail2ban/SIEM key on 429, not 503
+    limit_conn_status 429;
+
+    # --- prober / autonomous-agent UA tagging (supporting signal only) ------
+    map $http_user_agent $agentwall_bad_ua {
+        default               0;
+        # Naive headless/automation UA claims (supporting signal only: stealth
+        # tooling spoofs these; the Lua JS report + timing checks are the real
+        # headless detection layer).
+        "~*HeadlessChrome"    1;
+        "~*Electron/"         1;
+        "~*PhantomJS"         1;
+        "~*SlimerJS"          1;
+        "~*playwright"        1;
+        "~*puppeteer"         1;
+        "~*selenium"          1;
+        "~*webdriver"         1;
+        "~*HtmlUnit"          1;
+        "~*Cypress"           1;
+        # Known autonomous-agent / scanner-default fingerprints (supporting signal:
+        # an operator can rotate UAs, so behaviour scoring remains the primary layer).
+        # Allowlist your own monitoring/scanners if you rely on these tools.
+        "~*artex-enrich"          1;
+        "~*norma/"                1;
+        "~*artex-selfupdate"      1;
+        "~*nuclei"                1;
+        "~*sqlmap"                1;
+        "~*ffuf"                  1;
+        "~*Fuzz Faster U Fool"    1;
+        "~*Nmap Scripting Engine" 1;
+        "~*dirsearch"             1;
+        "~*wafw00f"               1;
+        "~*arjun/"                1;
+        "~*katana/"               1;
+        "~*subfinder"             1;
+        "~*naabu"                 1;
+        "~*gospider"              1;
+        "~*interactsh"            1;
+        "~*nikto"                 1;
+        "~*gobuster"              1;
+        "~*feroxbuster"           1;
+        "~*wpscan"                1;
+        "~*masscan"               1;
+        "~*zgrab"                 1;
+        "~*^httpx/"               1;
+    }
+
+    # --- coarse injection/traversal markers on normalized URI + raw query ---
+    # No body inspection and no URL decoding here (the scorer re-checks a
+    # decoded copy); ModSecurity + OWASP CRS is the real signature layer.
+    map "$uri|$query_string" $agentwall_probe {
+        default                   0;
+        "~*\.\./"                 1;
+        "~*'\s*or\s*'?[0-9]"      1;
+        "~*union[\s/*]+select"    1;
+        "~*<script"               1;
+        "~*;\s*drop\s+table"      1;
+        "~*/etc/passwd"           1;
+    }
+
+    # --- access log consumed by the scorer + fail2ban -----------------------
+    # Keep the combined-format leading fields; only append after them.
+    # ua_flag/probe come from the maps above; xff is required for --use-xff.
+    log_format agentwall '$remote_addr - $remote_user [$time_local] '
+                     '"$request" $status $body_bytes_sent '
+                     '"$http_referer" "$http_user_agent" '
+                     'rt=$request_time urt=$upstream_response_time '
+                     'ua_flag=$agentwall_bad_ua probe=$agentwall_probe '
+                     'xff="$http_x_forwarded_for"';
+
+    access_log /var/log/nginx/agentwall_access.log agentwall;
+
+    # ---------------------------------------------------------------------
+    # REAL CLIENT IP — EDIT. List ONLY the CDN/LB ranges you control. A client
+    # that can spoof XFF must not be trusted: these ranges are the ones nginx
+    # will believe. With this in place, $remote_addr (and the log's first field)
+    # is the true client, so limits, fail2ban, the scorer and the Lua layer all
+    # key on the same address. NEVER use 0.0.0.0/0 in production.
+    # ---------------------------------------------------------------------
+    set_real_ip_from 10.0.0.0/8;        # <-- EDIT (example private range)
+    set_real_ip_from 172.16.0.0/12;     # <-- EDIT (example docker/LB range)
+    real_ip_header    X-Forwarded-For;
+    real_ip_recursive on;
+
+    # --- application backend ------------------------------------------------
+    upstream app_backend {
+        server 127.0.0.1:8080;          # <-- EDIT
+        keepalive 64;
+    }
+
+    # ---------------------------------------------------------------------
+    # SITE
+    # ---------------------------------------------------------------------
+    server {
+        listen 80;
+        server_name example.com;        # <-- EDIT
+
+        # Terminate TLS here (recommended), or at a CDN/LB in front:
+        #   listen 443 ssl http2;
+        #   ssl_certificate     /etc/ssl/example.com/fullchain.pem;   # <-- EDIT
+        #   ssl_certificate_key /etc/ssl/example.com/privkey.pem;     # <-- EDIT
+        #   ssl_protocols TLSv1.2 TLSv1.3;
+        #   ssl_session_cache shared:SSL:10m;
+        # and a separate server { listen 80; return 301 https://$host$request_uri; }
+
+        # Hard blocks. A server-scope `if` with `return` on a map variable is a
+        # safe, documented nginx pattern.
+        if ($agentwall_bad_ua) { return 403; }
+        if ($agentwall_probe)  { return 403; }
+
+        limit_req  zone=agentwall_general burst=30 nodelay;
+        limit_conn agentwall_conn 25;
+
+        # Inline ML enforcement (OpenResty/lua-nginx-module). limit_req above
+        # runs in the preaccess phase, i.e. BEFORE this access-phase script, so
+        # a throttled request is rejected by the cheap limiter first.
+        # NOTE: locations that finish in the rewrite phase (`return ...`) never
+        # reach this script — serve protected content through proxy_pass/root.
+        access_by_lua_file /etc/nginx/lua/agentwall_challenge_block.lua;
+
+        # --- authentication / identity endpoints: tight throttle -------------
+        location ~* ^/(login|signin|sign-in|auth|oauth|token|verify|otp|mfa|2fa|password/(reset|forgot)) {
+            limit_req  zone=agentwall_auth burst=4 nodelay;
+            limit_conn agentwall_conn 5;
+
+            proxy_pass         http://app_backend;
+            proxy_http_version 1.1;
+            proxy_set_header   Connection "";
+            proxy_set_header   Host              $host;
+            # Overwrite (do not append) client-supplied XFF: real_ip already
+            # recovered the true client; an inherited spoofed chain must not
+            # reach the application.
+            proxy_set_header   X-Forwarded-For   $remote_addr;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_connect_timeout 5s;
+            proxy_read_timeout    30s;
+            proxy_send_timeout    30s;
+        }
+
+        # --- human-verification endpoint (Lua challenge layer) ---------------
+        # The server-level access_by_lua_file above handles this URI before any
+        # content phase. If it ever falls through (e.g. no challenge active),
+        # answer 404 instead of proxying an internal path to the app. NOTE:
+        # content_by_lua, not `return`, because a rewrite-phase return would
+        # skip the access phase — the very thing we must avoid here.
+        location = /__agentwall_verify {
+            default_type application/json;
+            content_by_lua_block { ngx.exit(404) }
+        }
+
+        # --- main application ------------------------------------------------
+        location / {
+            proxy_pass         http://app_backend;
+            proxy_http_version 1.1;
+            proxy_set_header   Connection "";
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Forwarded-For   $remote_addr;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_connect_timeout 5s;
+            proxy_read_timeout    60s;
+            proxy_send_timeout    60s;
+        }
+    }
+}
+
+# =============================================================================
+# OPTIONAL NEXT LAYER: ModSecurity v3 + OWASP CRS (body inspection + anomaly
+# scoring + URL decoding). Start in DetectionOnly, baseline, then enforce.
+# In the relevant server/location block:
+#   modsecurity on;
+#   modsecurity_rules_file /etc/nginx/modsec/main.conf;
+# =============================================================================

@@ -1,0 +1,19 @@
+# Python bytecode / virtualenvs
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Secrets and local overrides (compose loads deploy/.env)
+secrets/
+.env
+*.env.local
+
+# Model checkpoints / runtime state
+*.pkl
+*.tmp.*
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/

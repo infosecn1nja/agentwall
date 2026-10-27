@@ -1,0 +1,31 @@
+# =============================================================================
+# Least-privilege sudoers for the ML scorer's fail2ban backend.
+# -----------------------------------------------------------------------------
+# Install as root (mode 0440 — sudo refuses world-writable include files):
+#   sudo install -m 0440 deploy/sudoers.d-agentwall-ml /etc/sudoers.d/agentwall-ml
+#   sudo visudo -cf /etc/sudoers.d/agentwall-ml     # validate BEFORE trusting it
+#
+# The scorer only invokes this when started with BOTH:
+#   --enforce --backend fail2ban --fail2ban-sudo
+# With --fail2ban-sudo the scorer prefixes its call with `sudo -n`
+# (non-interactive: a password prompt would hang the scorer; it fails closed and
+# logs the error). The default command is /usr/bin/fail2ban-client; override it
+# with --fail2ban-cmd PATH or the AGENTWALL_FAIL2BAN_CMD env var if yours lives
+# elsewhere — if so, update the path below to match EXACTLY.
+#
+# Scope: ONE binary, ONE jail, ONE action (banip), nothing else.
+#   * no unban / no reload / no config reads or writes
+#   * no shell: sudo execs fail2ban-client directly, so `;`/`|` in an IP arg is
+#     not interpreted (the scorer also validates it is an IP it parsed).
+# NOPASSWD is required because the service has no TTY; the narrow command scope
+# is what keeps this least-privilege.
+#
+# IMPORTANT — the systemd unit's NoNewPrivileges=true makes sudo (setuid) fail.
+# If you enable --fail2ban-sudo, set NoNewPrivileges=false on the unit and keep
+# this rule as the only privilege boundary. Prefer --backend redis (no sudo).
+#
+# You do NOT need this file for --backend redis or --backend none.
+# =============================================================================
+Cmnd_Alias AGENTWALL_ML_BAN = /usr/bin/fail2ban-client set agentwall-ml banip *
+
+agentwall ALL=(root) NOPASSWD: AGENTWALL_ML_BAN

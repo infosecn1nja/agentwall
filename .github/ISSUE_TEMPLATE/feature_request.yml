@@ -1,0 +1,55 @@
+name: Feature request
+description: Propose a detection, hardening, operability or documentation improvement
+title: "[feature] "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        AgentWall values **measured, testable** improvements. Please describe the
+        threat/behavior you want to address and how you would verify it.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Area
+      options:
+        - scorer / detection
+        - headless/automation detection
+        - WAF/rate limiting
+        - fail2ban
+        - deploy/ops
+        - observability
+        - tests/CI
+        - docs
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / threat addressed
+      description: What traffic or failure mode is currently missed, and what is the impact?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Include config/flag names you would add, and defaults. Note false positives and fail-open behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: How to verify it
+      description: Unit/e2e tests or a red-team scenario that would prove it works.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: This is not a request to claim "block all AI pentests"; it is bounded and testable.
+          required: true
+        - label: I noted the likely false positives and rollout mode (mark/shadow first).
+          required: true

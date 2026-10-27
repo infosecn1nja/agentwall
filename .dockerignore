@@ -1,0 +1,70 @@
+# =============================================================================
+# .dockerignore — build context is the REPO ROOT
+# (deploy/docker-compose.yml: build.context: "..", dockerfile: deploy/Dockerfile)
+# -----------------------------------------------------------------------------
+# The scorer image only needs:
+#   deploy/Dockerfile
+#   scorer/requirements.txt
+#   scorer/agentwall_scorer_v1.py
+#   scorer/agentwall_scorer.py
+# Everything else stays out so the context stays small and secrets/peripheral
+# components cannot leak into the image. Docker always reads the .dockerignore
+# at the root of the build CONTEXT (this file), not next to the Dockerfile.
+# =============================================================================
+
+# --- secrets / local env ----------------------------------------------------
+.env
+.env.*
+*.env
+!.env.example
+
+# --- VCS / OS / editor cruft ------------------------------------------------
+.git
+.gitignore
+.gitattributes
+.github
+.DS_Store
+*.swp
+*.swo
+.idea
+.vscode
+
+# --- Python bytecode / caches / venvs ---------------------------------------
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+.venv
+venv
+ENV
+.python-version
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# --- tests / fixtures / scratch ---------------------------------------------
+tests
+test
+**/test_*.py
+**/*_test.py
+
+# --- non-image parts of the stack -------------------------------------------
+waf
+fail2ban
+nginx-lua
+docs
+
+# --- deploy-side files the image does not need ------------------------------
+deploy/*.md
+deploy/docker-compose.yml
+deploy/preflight.sh
+deploy/sudoers.d-agentwall
+deploy/*.service
+deploy/.dockerignore
+
+# --- misc -------------------------------------------------------------------
+*.log
+*.tmp
+*.bak
+Makefile
+README.md

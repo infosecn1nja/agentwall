@@ -1,0 +1,539 @@
+# =============================================================================
+# deploy/prometheus/agentwall.rules.yml — Prometheus v2 alerting rules for agentwall
+# -----------------------------------------------------------------------------
+# Metric source: scorer/agentwall_scorer.py (--metrics-port 9101).
+# The scorer serves a hand-rolled stdlib text endpoint, so:
+#   * every series is PROCESS-LOCAL: counters reset to 0 (and disappear from
+#     /metrics until first incremented) when the scorer restarts;
+#   * the scorer attaches NO labels of its own. Prometheus adds job/instance
+#     (plus service/component from the scrape config), so selectors below pin
+#     job="agentwall-scorer" — the job name from deploy/prometheus/scrape.example.yml.
+#
+# Semantics that matter for alert interpretation:
+#   * Counters count ACTIVITY, not enforcement. In DRY-RUN the block/challenge/
+#     watch counters still increment; only agentwall_cleared_total requires
+#     --enforce + --backend redis, and agentwall_redis_up only exists with a Redis
+#     backend. That is why AgentWallChallengePassRatioLow cannot fire in dry-run:
+#     the cleared counter is absent until an enforced clearance happens.
+#   * agentwall_redis_up is sampled at startup/preflight, not per request, so it is
+#     paired with agentwall_redis_errors_total (runtime failures) below.
+#
+# `and on()` (empty label list) is used deliberately where a per-instance series
+# (up, agentwall_*) is combined with an aggregate such as sum(rate(...)) that has no
+# labels: plain `and` would never match because the label sets differ.
+#
+# Validate and load:
+#   promtool check rules deploy/prometheus/agentwall.rules.yml
+#   install -m 0644 deploy/prometheus/agentwall.rules.yml /etc/prometheus/rules/
+#   systemctl reload prometheus
+# =============================================================================
+
+groups:
+  # ===========================================================================
+  # Availability: is the scorer scrapeable, and is it consuming the access log
+  # at all? The scorer is NOT in the request path, so a dead scorer does not
+  # 500 the site — it silently stops producing new verdicts while the proxy
+  # keeps enforcing the last TTL keys. That failure mode must page.
+  # ===========================================================================
+  - name: agentwall-scorer-availability
+    rules:
+      - alert: AgentWallScorerDown
+        expr: up{job="agentwall-scorer"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'agentwall scorer is down on {{ $labels.instance }}'
+          description: >-
+            Prometheus cannot scrape the scorer /metrics endpoint (up == 0) for
+            2m. Existing agentwall:block:* keys keep being enforced by the proxy
+            until their TTL (~30m) expires, but NO new verdicts are produced,
+            so protection decays and then stops. Check `systemctl status
+            agentwall-scorer` or `docker compose ps scorer`, the last 100 journal
+            lines (OOM/crash-loop?), and whether the metrics port or
+            --metrics-bind changed.
+
+      - alert: AgentWallScorerNoEvents
+        expr: |
+          (up{job="agentwall-scorer"} == 1)
+          and on()
+          (
+            increase(agentwall_events_total{job="agentwall-scorer"}[5m]) == 0
+            or
+            absent(agentwall_events_total{job="agentwall-scorer"})
+          )
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'agentwall scorer is up but has not read an access-log line in 10m'
+          description: >-
+            The process is scrapeable but increase(agentwall_events_total[5m]) is
+            zero, or the counter never appeared at all. Either the site is
+            genuinely idle, or the tail is stalled: wrong --log path, the file
+            was rotated and nginx never reopened it (USR1), the scorer user
+            cannot read it (SupplementaryGroups=adm), or a log_format change
+            broke the envelope. No events means no learning and no protection.
+            Verify with `wc -l /var/log/nginx/agentwall_access.log` growing and
+            `journalctl -u agentwall-scorer -n 50`.
+
+  # ===========================================================================
+  # Ingest health: are log lines being parsed and are they scoring anything?
+  # A healthy process parsing garbage (or skipping everything) is a silent,
+  # total loss of protection.
+  # ===========================================================================
+  - name: agentwall-scorer-ingest
+    rules:
+      # Ratio rather than a raw count: a big site always has some junk lines.
+      # clamp_min(denominator, 1) requires >= 0.01 parse errors/second before
+      # the ratio can trip, so a trickle of low-traffic noise cannot page.
+      - alert: AgentWallParseErrorRateHigh
+        expr: |
+          sum(rate(agentwall_parse_errors_total{job="agentwall-scorer"}[10m]))
+          /
+          clamp_min(sum(rate(agentwall_events_total{job="agentwall-scorer"}[10m])), 1)
+          > 0.01
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'agentwall parse errors exceed 1% of access-log lines'
+          description: >-
+            More than 1% of lines fail LOG_RE for 10m ({{ $value |
+            humanizePercentage }}). Usual causes: a log_format change (missing
+            agentwall tail fields, quotes stripped, Apache %{...}e vs nginx $var),
+            mixed formats across vhosts writing the same file, or the log being
+            written by something other than nginx/Apache. Unparsed lines never
+            reach the model, so suspicious IPs in that share are invisible —
+            at 100% the scorer is blind. Compare one failing line with LOG_RE
+            in scorer/agentwall_scorer.py.
+
+      # agentwall_xff_missing_warnings_total increments ONCE per scorer process
+      # (the warning is deliberately rate-limited), hence increase over 1h and
+      # no `for:` — it is a one-shot configuration alarm, not a trend.
+      - alert: AgentWallXffMissing
+        expr: increase(agentwall_xff_missing_warnings_total{job="agentwall-scorer"}[1h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: 'agentwall runs --use-xff but the access log has no xff= field'
+          description: >-
+            The scorer emitted its one-shot xff-missing warning: --use-xff is
+            set but the first 1000 parsed lines carried no xff="..." tail, so
+            the client IP is taken from the first log field (the proxy/CDN
+            address) instead of the real client. Verdicts then land on the
+            wrong Redis key and real clients are never blocked (or everyone
+            is). Add xff="$http_x_forwarded_for" to the nginx log_format / the
+            %{X-Forwarded-For}i LogFormat in Apache, or drop --use-xff when
+            nginx real_ip already recovers the client IP.
+
+      # events flowing but nothing learned/scored: the model's view of the
+      # world is empty. Distinct from AgentWallScorerSkippingMostEvents (below),
+      # which trips only at >90% skipped rather than 100%.
+      - alert: AgentWallScoringStalled
+        expr: |
+          (up{job="agentwall-scorer"} == 1)
+          and on()
+          (sum(rate(agentwall_events_total{job="agentwall-scorer"}[15m])) > 0)
+          and on()
+          (
+            sum(rate(agentwall_learned_total{job="agentwall-scorer"}[15m])) == 0
+            or
+            absent(agentwall_learned_total{job="agentwall-scorer"})
+          )
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: 'agentwall reads access-log lines but scores none of them'
+          description: >-
+            Events are arriving but agentwall_learned_total is flat: every line is
+            being classified allowlisted or verified-good-bot, or is failing to
+            parse. Typical causes: an --allowlist that covers the CDN/LB ranges
+            (or a /0), good-bot FCrDNS verification accepting everything, or a
+            log_format that parses the envelope but loses the scored fields.
+            Check `agentwall_allowlisted_total` / `agentwall_goodbot_total` growth and
+            the configured --allowlist/--allowlist-file before trusting the
+            scorer for enforcement.
+
+  # ===========================================================================
+  # Dependencies: Redis (verdict store) and the model checkpoint. Failures here
+  # mean verdicts are dropped or the model restarts cold, not that the proxy
+  # stops serving.
+  # ===========================================================================
+  - name: agentwall-scorer-dependencies
+    rules:
+      # Only exported when the scorer runs --backend redis|both; absent series
+      # (fail2ban-only or dry-run-with-no-backend) keeps this rule quiet.
+      - alert: AgentWallRedisDown
+        expr: agentwall_redis_up{job="agentwall-scorer"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'agentwall scorer cannot reach Redis (verdict store down)'
+          description: >-
+            agentwall_redis_up == 0 for 5m: the Redis preflight ping failed. The Lua
+            layer also fails open when Redis is unreachable, so blocks and
+            challenges stop being enforced, and the scorer logs critical action
+            errors. Check the Redis service/container, requirepass/ACL drift,
+            the loopback bind, and `redis-cli -u "$REDIS_URL" ping` from the
+            scorer host. NOTE: this gauge is sampled at startup/preflight, so
+            runtime failures after a good start surface in
+            agentwall_redis_errors_total (AgentWallRedisErrorSpike) instead.
+
+      - alert: AgentWallRedisErrorSpike
+        expr: increase(agentwall_redis_errors_total{job="agentwall-scorer"}[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'agentwall Redis operations are failing'
+          description: >-
+            More than 10 Redis errors in 5m while writing/reading
+            agentwall:block:*, agentwall:challenge:*, agentwall:cleared:* ({{ $value }}
+            errors). Verdicts are being dropped silently. Check Redis memory and
+            maxmemory-policy (OOM evictions), latency vs --redis-timeout, AUTH,
+            and the network path. Each dropped verdict is an unblocked bad
+            client for the block TTL window.
+
+      # agentwall_action_errors_total is the non-Redis half of the Actioner error
+      # path (_err()). It currently stays at 0 because all shipped actions are
+      # Redis-backed; keep the alert as a tripwire for fail2ban/other action
+      # backends and for future code paths that route errors through _err().
+      - alert: AgentWallActionErrorSpike
+        expr: increase(agentwall_action_errors_total{job="agentwall-scorer"}[10m]) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'agentwall action path is reporting errors'
+          description: >-
+            Non-Redis action errors exceeded 5 in 10m ({{ $value }}). With the
+            shipped code this counter is expected to stay 0 (all action errors
+            are tagged redis-*); a non-zero value means a non-Redis enforcement
+            path (fail2ban subprocess, clear/challenge bookkeeping) is failing.
+            Inspect the scorer log for lines containing "failed:".
+
+      # Packet-ban backend only (--backend fail2ban|both). A failed ban means
+      # the offending IP keeps hitting the box; also check sudoers/NNP when
+      # --fail2ban-sudo is used.
+      - alert: AgentWallFail2banErrors
+        expr: increase(agentwall_fail2ban_errors_total{job="agentwall-scorer"}[10m]) > 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'agentwall fail2ban bans are failing'
+          description: >-
+            fail2ban-client failed >3 times in 10m ({{ $value }}). With
+            --backend fail2ban|both this means suspicious IPs are NOT
+            packet-banned and keep reaching the origin. Check
+            `/etc/sudoers.d/agentwall-ml` (a NoNewPrivileges=true unit blocks sudo),
+            the `agentwall-ml` jail name, and `fail2ban-client status agentwall-ml`.
+            The scorer debounces one call per IP per minute, so a persistent
+            count means a systemic failure, not one flaky IP.
+
+      # Checkpoint load failure: the model starts cold. Traffic is still
+      # scored, but relative percentiles/floors are not warmed up yet.
+      - alert: AgentWallStateLoadFailures
+        expr: increase(agentwall_state_load_failures_total{job="agentwall-scorer"}[1h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: 'agentwall model checkpoint failed to load at startup'
+          description: >-
+            The scorer could not load its --state checkpoint and started with a
+            fresh river model (arity/version mismatch, truncated file, or a
+            state path that disappeared). Detection quality is degraded until
+            warmup completes and the model re-learns; no enforcement action
+            happens before --warmup (800 events by default). Check the scorer
+            startup log, the state file owner/mode under /var/lib/agentwall, and
+            STATE_VERSION compatibility. agentwall_state_loads_total shows
+            successful loads for reference.
+
+      # Saves happen every 60s when --state is set. Repeated failures lose
+      # model progress on restart (and eventually detection quality).
+      - alert: AgentWallStateSaveErrors
+        expr: increase(agentwall_state_save_errors_total{job="agentwall-scorer"}[15m]) > 2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'agentwall cannot persist its model checkpoint'
+          description: >-
+            More than 2 failed state saves in 15m ({{ $value }}); saves run
+            about once a minute (compare agentwall_state_saves_total). A restart
+            will lose model progress and re-warm from cold. Check that
+            /var/lib/agentwall (or the compose volume) is writable by the
+            service user, disk/inode pressure, and that systemd
+            ReadWritePaths/ProtectSystem allow the state directory.
+
+      # Good-bot FCrDNS lookups are background verifications: a timeout makes
+      # the scorer treat a bot as an unverified client (scored like a human).
+      - alert: AgentWallDnsTimeouts
+        expr: increase(agentwall_dns_timeouts_total{job="agentwall-scorer"}[10m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'agentwall good-bot reverse-DNS checks are timing out'
+          description: >-
+            More than 10 FCrDNS timeouts in 10m ({{ $value }}; budget is
+            --dns-timeout, 0.8s default). Resolver latency or a broken upstream
+            makes verified crawlers look like ordinary clients, which inflates
+            challenge/block volume and can block real search-engine crawlers.
+            Check /etc/resolv.conf on the scorer host, the local resolver, and
+            whether DNS is being rate-limited. A persistent spike is often a
+            network path change rather than a scorer bug.
+
+  # ===========================================================================
+  # Detection quality / calibration: these do not indicate an outage, they
+  # indicate the scorer is working with a degraded or misconfigured model.
+  # ===========================================================================
+  - name: agentwall-scorer-detection
+    rules:
+      # No enforcement decisions happen until --warmup events are learned
+      # (800 by default). Stuck at 0 for 2h with traffic flowing = the scorer
+      # is only observing. On a genuinely low-traffic host this can be normal;
+      # tune --warmup or this rule's `for:` to the site's volume.
+      - alert: AgentWallWarmupStuck
+        expr: |
+          (agentwall_warmup_done{job="agentwall-scorer"} == 0)
+          and on()
+          (up{job="agentwall-scorer"} == 1)
+          and on()
+          (sum(increase(agentwall_events_total{job="agentwall-scorer"}[2h])) > 0)
+        for: 2h
+        labels:
+          severity: warning
+        annotations:
+          summary: 'agentwall warmup has not completed in 2h despite traffic'
+          description: >-
+            agentwall_warmup_done is still 0 two hours after start while log lines
+            are arriving, so the scorer is not yet allowed to act and the
+            protection layer is effectively passive. If traffic is genuinely
+            below --warmup (800 events default) this is expected — lower
+            --warmup only after baselining. Otherwise check that events are
+            parsed and scored (AgentWallScoringStalled) and that the process was not
+            crash-looping: warmup state lives in memory and resets on restart.
+
+      # max_ips defaults to 200000; at ~75% the LRU starts evicting live
+      # trackers soon, diluting per-IP history. Threshold assumes the default —
+      # scale it with --max-ips if you raise that.
+      - alert: AgentWallTrackedIPsNearCap
+        expr: agentwall_tracked_ips{job="agentwall-scorer"} > 150000
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'agentwall is tracking >150k IPs (LRU cap ~200k)'
+          description: >-
+            agentwall_tracked_ips has exceeded 150000 for 15m. The per-IP window
+            cache is close to --max-ips (200000 default), after which LRU
+            eviction drops recent history for still-active IPs, weakening
+            multi-event detection exactly when traffic is high. Confirm the
+            traffic is real (scanner wave / proxy misconfiguration feeding the
+            scorer) before raising --max-ips, which increases memory use.
+
+      # Evictions mean the cap was actually hit; informational because the
+      # tracked-IPs rule above already warns before it becomes systemic.
+      - alert: AgentWallEvictionActive
+        expr: increase(agentwall_evicted_total{job="agentwall-scorer"}[15m]) > 100
+        for: 10m
+        labels:
+          severity: info
+        annotations:
+          summary: 'agentwall is evicting live IP trackers (LRU cap reached)'
+          description: >-
+            agentwall_evicted_total is growing ({{ $value }} evictions in 15m),
+            i.e. --max-ips is being hit and the oldest IP windows are dropped.
+            Detection history for evicted IPs restarts from zero, which lets
+            some suspicious clients fall back under --min-events. Treat as a
+            capacity signal: investigate traffic sources, then size --max-ips
+            and memory (MemoryMax=1G in the systemd unit) together.
+
+      # Block decisions should be rare on healthy traffic: the design is
+      # challenge-first and relative to the population. A sustained >5% block
+      # rate usually means over-blocking or a broken human-ness signal, which
+      # costs real visitors.
+      - alert: AgentWallBlockRateHigh
+        expr: |
+          sum(rate(agentwall_block_total{job="agentwall-scorer"}[15m]))
+          /
+          clamp_min(sum(rate(agentwall_events_total{job="agentwall-scorer"}[15m])), 1)
+          > 0.05
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'agentwall is blocking >5% of scored traffic'
+          description: >-
+            The block rate has exceeded 5% of all log events for 15m ({{ $value
+            | humanizePercentage }}). The scorer is challenge-first and
+            population-relative, so this is unusual and usually means
+            over-blocking: a bad --floor-block/--p-block, a feature/log_format
+            change that makes real clients look like tools, the human-ness
+            floor not matching the traffic profile (--profile web vs api), or a
+            scanner wave. Check agentwall_hard_block_total vs agentwall_block_total: a
+            hard-block-dominated spike is scanner traffic, otherwise suspect
+            calibration.
+
+      # Hard signal (multi-stage path, probe string, or tool UA) is
+      # near-certain automation — this is scans, not calibration.
+      - alert: AgentWallHardBlockSpike
+        expr: increase(agentwall_hard_block_total{job="agentwall-scorer"}[10m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'agentwall is hard-blocking scanners at an elevated rate'
+          description: >-
+            More than 10 hard-signal blocks in 10m ({{ $value }}): multi-stage
+            probing, probe payloads, or tool user-agents. Usually an active
+            scanning campaign. Confirm enforcement works end to end (a 403 from
+            the proxy for one of the blocked keys) and, if the rate is very
+            high, check that nothing is looping its own health checks through
+            the scored path (e.g. a CDN origin check with a tool UA).
+
+      # cleared_total / challenge_total is the challenge pass ratio. It only
+      # exists in ENFORCE + Redis mode, so in dry-run/observe phase the cleared
+      # counter is absent and this rule stays quiet by construction. A real
+      # ratio collapse means challenged humans cannot get through: PoW JS
+      # broken, clearance cookie rejected (secret change, clock skew), or the
+      # agentwall:cleared key contract broken.
+      - alert: AgentWallHeadlessDetected
+        expr: increase(agentwall_headless_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'headless/automation browsers detected by the challenge layer'
+          description: >-
+            The Lua human-verification step marked one or more clients as
+            headless/automation (agentwall:headless:*). This is expected during an
+            automated pentest / scanner wave, but sustained detections from a
+            range you care about deserve a look: it means the clients solve the
+            PoW and are still non-human. Correlate with agentwall_challenge_total and
+            the proxy error log lines "headless/automation detected". Note the
+            marker is advisory (stealth tooling can spoof JS surfaces), so treat
+            this as signal, not proof.
+
+      - alert: AgentWallChallengePassRatioLow
+        expr: |
+          sum(rate(agentwall_cleared_total{job="agentwall-scorer"}[15m]))
+          /
+          clamp_min(sum(rate(agentwall_challenge_total{job="agentwall-scorer"}[15m])), 0.001)
+          < 0.2
+          and on()
+          sum(rate(agentwall_challenge_total{job="agentwall-scorer"}[15m])) > 0.01
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'challenged clients are not clearing the agentwall challenge'
+          description: >-
+            Fewer than 20% of issued challenges are being cleared for 30m while
+            at least 0.01 challenges/s are issued ({{ $value |
+            humanizePercentage }}). Real users hitting a 429 loop is a
+            revenue/UX incident. Check: AGENTWALL_CHAL_SECRET is identical in the
+            nginx env and (if used) on every node; system clocks (the
+            clearance cookie is signed and time-bounded); that the PoW JS loads
+            (CSP/asset 404s); that the agentwall:cleared:<ip> key written by Lua is
+            readable by the scorer (same Redis database). If the scorer was
+            switched to dry-run, clear/silence this rule — dry-run cannot
+            increment agentwall_cleared_total.
+
+      # Watch is the pre-block signal. A sustained high watch share means the
+      # population-relative cutoff is flagging a lot of traffic; useful early
+      # warning before the block rate rises.
+      - alert: AgentWallWatchRateHigh
+        expr: |
+          sum(rate(agentwall_watch_total{job="agentwall-scorer"}[30m]))
+          /
+          clamp_min(sum(rate(agentwall_events_total{job="agentwall-scorer"}[30m])), 1)
+          > 0.25
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: 'agentwall watch rate is above 25% of scored traffic'
+          description: >-
+            More than 25% of events land in the WATCH band for 30m ({{ $value |
+            humanizePercentage }}). WATCH is the pre-challenge suspicion band,
+            so this is an early indicator of over-flagging (calibration,
+            profile mismatch, or an attack) before clients are challenged or
+            blocked. Compare with agentwall_block_cut/agentwall_watch_cut and
+            agentwall_hard_block_total to tell calibration drift from hostile
+            traffic.
+
+      # The scorer applies floors, so --floor-block (0.55) should stay above
+      # --floor-watch (0.40). If the percentiles ever invert the cuts, block
+      # decisions become no stricter than watch — a silent misconfiguration.
+      - alert: AgentWallBlockCutInverted
+        expr: |
+          agentwall_block_cut{job="agentwall-scorer"} <= agentwall_watch_cut{job="agentwall-scorer"}
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: 'agentwall block cutoff is at/below the watch cutoff'
+          description: >-
+            agentwall_block_cut <= agentwall_watch_cut for 15m. The block percentile is
+            supposed to be stricter than the watch percentile, and both are
+            floored by --floor-block (0.55 default) / --floor-watch (0.40), so
+            this should never happen with sane configuration. Check for an
+            inverted --floor-block/--floor-watch or --p-block/--p-watch pair
+            after a config change; otherwise block decisions are effectively
+            watch decisions.
+
+      # The population reservoir feeds the relative percentiles. Below 500
+      # samples (pop.ready()) the scorers use the fixed floors instead, which
+      # still works but is not the population-relative design.
+      - alert: AgentWallPopulationThin
+        expr: |
+          (agentwall_pop_size{job="agentwall-scorer"} < 500)
+          and on()
+          (up{job="agentwall-scorer"} == 1)
+        for: 2h
+        labels:
+          severity: info
+        annotations:
+          summary: 'agentwall population sample is too small for relative cutoffs'
+          description: >-
+            Fewer than 500 suspicion samples in the rolling window for 2h, so
+            the adaptive percentile cutoffs fall back to the fixed floors
+            (agentwall_block_cut/agentwall_watch_cut stay at floor values) and
+            detection is no longer population-relative. On a low-traffic host
+            this is expected; otherwise it points at an ingest problem (see
+            AgentWallScorerNoEvents) or a very small scored share
+            (AgentWallScorerSkippingMostEvents).
+
+      # allowlisted_total and goodbot_total have no per-series thresholds: a
+      # busy site with a CDN/LB allowlist and crawl traffic legitimately skips
+      # most events. This rule flags only the pathological case (almost nothing
+      # scored), which means the model's view of the world is gone.
+      - alert: AgentWallScorerSkippingMostEvents
+        expr: |
+          (
+            (sum(rate(agentwall_allowlisted_total{job="agentwall-scorer"}[1h])) or vector(0))
+            +
+            (sum(rate(agentwall_goodbot_total{job="agentwall-scorer"}[1h])) or vector(0))
+          )
+          /
+          clamp_min(sum(rate(agentwall_events_total{job="agentwall-scorer"}[1h])), 1)
+          > 0.9
+        for: 1h
+        labels:
+          severity: info
+        annotations:
+          summary: 'more than 90% of agentwall log lines are skipped'
+          description: >-
+            Over 90% of events are allowlisted (agentwall_allowlisted_total) or
+            verified good-bot (agentwall_goodbot_total) for 1h, so very little
+            traffic reaches the model ({{ $value | humanizePercentage }}).
+            This is expected if a CDN/LB edge tier is supposed to filter before
+            the scorer. If it grew unexpectedly, the scorer is effectively
+            disabled: verify --allowlist/--allowlist-file, and check that the
+            log's first IP field is not the proxy itself (missing/incorrect XFF
+            recovery makes every client look allowlisted).

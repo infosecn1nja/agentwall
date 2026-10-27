@@ -1,0 +1,81 @@
+# /etc/fail2ban/jail.d/agentwall.local
+# Behavioural jails: persistence/enumeration + auth abuse.
+# -----------------------------------------------------------------------------
+# BEFORE ENABLING — READ THE IP-SOURCE WARNING:
+# fail2ban extracts <HOST> from the FIRST field of each access-log line, i.e.
+# Apache %a / nginx $remote_addr. Behind a CDN/LB that is the CDN/LB address
+# unless you recover the real client IP AT THE EDGE:
+#   nginx/OpenResty: real_ip_header X-Forwarded-For + set_real_ip_from <CDN CIDRs>
+#   Apache:          mod_remoteip (see waf/apache-agentwall.conf §5)
+# The ML scorer may use --use-xff to read the xff="..." log tail, but fail2ban
+# CANNOT: its filters only see the leading fields. If the edge does not rewrite
+# the client IP, these jails ban the CDN/LB and take the whole site down for
+# legitimate users. Do NOT "fix" that by putting CDN ranges in ignoreip — that
+# whitelists everyone as seen through the CDN. Fix real_ip instead.
+#
+# LOGPATH — pick the same log your proxy writes (default: nginx):
+#   nginx/OpenResty : /var/log/nginx/agentwall_access.log
+#   Apache          : /var/log/apache2/agentwall_access.log
+#
+# backend = auto (fail2ban default): uses pyinotify/gamin when available, else
+# polling; do not force `polling` unless you must (slower + rotation quirks).
+#
+# BANTIME: keep the base bantime equal to the scorer's block TTL — --block-ttl,
+# default 1800s, which is also the Redis agentwall:block:* TTL — so a fail2ban ban
+# and the Redis block expire together. Change both together. bantime.increment
+# escalates repeat offenders.
+#
+# BANACTION: the default on most hosts is iptables-multiport. On nftables hosts
+# (fail2ban >= 0.11) set `banaction = nftables-multiport` per jail and verify the
+# rules land in nft, not iptables.
+#
+# IGNOREIP: loopback is listed per-jail below. Append your monitoring/scanner/
+# office CIDRs on the same line. Keep this per-jail rather than in [DEFAULT]:
+# files in jail.d/*.local load LAST, so a [DEFAULT] here would override the
+# operator's own ignoreip in jail.local.
+#
+# Tune maxretry/findtime/bantime to your baseline before enabling — start loose,
+# watch `fail2ban-client status`, then tighten.
+#
+# SYNTAX GOTCHA (verified on fail2ban 0.11.2 / Ubuntu 22.04 and 1.0.2 / 24.04):
+# the fail2ban config parser does NOT strip a trailing `#` comment from an
+# option line (only `;` is treated as an inline comment). A value like
+#     maxretry = 40   # explanation
+# is read as the literal string "40   # explanation"; int() conversion fails,
+# the option silently falls back to the global default, and a jail whose
+# maxretry fails can fail to start at all. KEEP ALL `#` COMMENTS ON THEIR OWN
+# LINES. deploy/validate-linux.sh fails on any "Wrong value for ..." warning.
+
+[agentwall-behavior]
+enabled  = true
+filter   = agentwall-behavior
+# nginx (default): /var/log/nginx/agentwall_access.log
+# apache:          /var/log/apache2/agentwall_access.log
+logpath  = /var/log/nginx/agentwall_access.log
+# 40 flagged responses within 60s from one IP = 30 min ban (bantime == scorer
+# block TTL; change both together).
+maxretry = 40
+findtime = 60
+bantime  = 1800
+bantime.increment = true
+bantime.factor    = 2
+bantime.maxtime   = 1d
+# Never ban loopback; append monitoring/scanner/office CIDRs (space or comma):
+ignoreip = 127.0.0.1/8 ::1
+# nftables hosts (fail2ban >= 0.11) — uncomment (default is iptables-multiport):
+#banaction = nftables-multiport
+
+[agentwall-auth]
+enabled  = true
+filter   = agentwall-auth
+logpath  = /var/log/nginx/agentwall_access.log
+# 10 denied auth hits within 2 min = 30 min ban, aligned with the scorer's
+# --block-ttl.
+maxretry = 10
+findtime = 120
+bantime  = 1800
+bantime.increment = true
+bantime.factor    = 2
+bantime.maxtime   = 1d
+ignoreip = 127.0.0.1/8 ::1
+#banaction = nftables-multiport

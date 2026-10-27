@@ -1,0 +1,86 @@
+# =============================================================================
+# Single-node deploy: Redis (verdict store) + ML scorer.
+# -----------------------------------------------------------------------------
+# OpenResty/nginx and fail2ban run on the host, reading the same access log and
+# the same Redis. The scorer tails the log and writes verdicts; it is NOT in the
+# request path (a scorer crash degrades to "no new verdicts", never downtime).
+#
+#   echo "REDIS_PASS=$(openssl rand -hex 24)" > .env   # in this deploy/ dir
+#   docker compose -f deploy/docker-compose.yml up -d
+#   docker compose -f deploy/docker-compose.yml logs -f scorer
+#
+# PHASE 1 (default, THIS FILE): DRY-RUN. The scorer command below has no
+#   --enforce and no --backend, so it only logs WATCH / BLOCK(dry-run) lines.
+#
+# PHASE 3 (enforce) — after baselining, see deploy/DEPLOYMENT-production.md:
+#   1. Add these three list items to the scorer `command:` list below:
+#          - "--enforce"
+#          - "--backend"
+#          - "redis"
+#   2. docker compose -f deploy/docker-compose.yml up -d --force-recreate scorer
+#   3. Rollback = remove the three items again (or redis-cli FLUSHDB the block keys).
+#
+# WHY THE COMMAND IS A YAML LIST AND NOT A `>` SCALAR: inside a folded/literal
+# scalar, a trailing `# comment` is NOT a comment — it becomes literal CLI
+# arguments. The scorer's argparse then exits 2, systemd/docker restarts it, and
+# it crash-loops. Keep every explanatory comment OUT here, never inside the
+# command block. (This was a real shipped bug; do not regress it.)
+# =============================================================================
+services:
+  redis:
+    image: redis:7-alpine
+    # Empty save + maxmemory volatile-ttl: this Redis is a TTL verdict cache, not
+    # durable storage. requirepass is mandatory — the keys decide who is blocked.
+    command: ["redis-server", "--save", "", "--maxmemory", "256mb",
+              "--maxmemory-policy", "volatile-ttl",
+              "--requirepass", "${REDIS_PASS:?REDIS_PASS is required - create deploy/.env}"]
+    environment:
+      # Used only by the healthcheck below; do not expose this container.
+      REDIS_PASS: "${REDIS_PASS:?REDIS_PASS is required - create deploy/.env}"
+    healthcheck:
+      # $$ escapes compose interpolation: the container shell expands $REDIS_PASS.
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASS\" --no-auth-warning ping | grep -q PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    ports: ["127.0.0.1:6379:6379"]      # loopback only — never expose Redis
+    restart: unless-stopped
+
+  scorer:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    # DRY-RUN command (Phase 1). YAML list — see the header warning about `>`.
+    # Redis URL comes from REDIS_URL below (scorer defaults --redis-url from env).
+    command:
+      - "--log"
+      - "/logs/agentwall_access.log"
+      - "--use-xff"
+      - "--state"
+      - "/state/model.pkl"
+      - "--metrics-port"
+      - "9101"
+      - "--metrics-bind"
+      - "0.0.0.0"
+      - "--log-level"
+      - "INFO"
+    environment:
+      REDIS_URL: "redis://:${REDIS_PASS:?REDIS_PASS is required - create deploy/.env}@redis:6379/0"
+    volumes:
+      - /var/log/nginx:/logs:ro          # read the proxy's access log (read-only)
+      - scorer_state:/state              # the ONLY path the scorer writes
+    depends_on:
+      redis:
+        condition: service_healthy       # don't start the scorer against a cold Redis
+    ports:
+      - "127.0.0.1:9101:9101"            # /metrics + /healthz, loopback only
+    read_only: true                      # root filesystem is immutable
+    tmpfs:
+      - /tmp:size=16m,mode=1777          # Python/libs need a writable /tmp
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  scorer_state:

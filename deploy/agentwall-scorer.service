@@ -1,0 +1,97 @@
+# =============================================================================
+# /etc/systemd/system/agentwall-scorer.service
+# Bare-metal run of the ML scorer (no Docker). Adjust paths to your install.
+# -----------------------------------------------------------------------------
+# SETUP (do these once; systemd does NOT create the user for you):
+#
+#   1. Unprivileged service account (no login, no home):
+#        sudo useradd --system --no-create-home --shell /usr/sbin/nologin agentwall
+#
+#   2. Secrets OUT of this file, in an EnvironmentFile (REDIS_URL is what the
+#      scorer uses by default for --redis-url):
+#        sudo install -m 0600 -o root -g agentwall /dev/null /etc/agentwall-scorer.env
+#        # then edit it:
+#        #   REDIS_URL=redis://:REPLACE_ME@127.0.0.1:6379/0
+#      AGENTWALL_CHAL_SECRET / AGENTWALL_REDIS_PASS are read by the nginx-Lua side, NOT
+#      by this scorer unit: export them in the proxy's own environment (nginx
+#      env / systemd EnvironmentFile for nginx), not in this file.
+#      The leading '-' in EnvironmentFile=-/etc/agentwall-scorer.env makes it OPTIONAL,
+#      so the unit still starts (dry-run, no Redis) on a fresh box.
+#
+#   3. Log read permissions: /var/log/nginx is typically root:adm 0640, so the
+#      unit joins the 'adm' supplementary group below (SupplementaryGroups=adm).
+#      If your log group differs: chgrp it accordingly + change this unit, or
+#      copy the log to a dedicated path with ACLs. Verify as the service user:
+#        sudo -u agentwall head -1 /var/log/nginx/agentwall_access.log
+#
+#   4. sudo systemctl daemon-reload
+#      sudo systemctl enable --now agentwall-scorer
+#      journalctl -u agentwall-scorer -f
+#
+# PHASE 1 (default, THIS FILE): DRY-RUN. The active ExecStart has no --enforce
+#   and no --backend, so the scorer only logs WATCH / BLOCK(dry-run) /
+#   CHALLENGE(dry-run) and never blocks. Keep it this way until shadow has been
+#   baselined across a full weekly cycle (deploy/DEPLOYMENT-production.md §3).
+#
+# PHASE 3 (enforce): comment out the ACTIVE ExecStart below, then uncomment
+#   exactly ONE of the two "# ExecStart (Phase 3 ...)" variants. Pick:
+#     * --backend redis     (preferred): nginx-lua reads agentwall:block:* keys.
+#     * --backend fail2ban  (packet ban): needs --fail2ban-sudo, the sudoers
+#       file, AND NoNewPrivileges=false (see the note below); only with the
+#       narrow /etc/sudoers.d/agentwall-ml rule.
+#   Then: sudo systemctl daemon-reload && sudo systemctl restart agentwall-scorer
+#   Rollback: restore this dry-run ExecStart (or redis-cli DEL the block keys).
+# =============================================================================
+[Unit]
+Description=AgentWall ML scorer (scale-aware) — dry-run unless configured
+Documentation=file:/opt/agentwall/deploy/DEPLOYMENT-production.md
+After=network-online.target redis.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agentwall
+# Read /var/log/nginx/agentwall_access.log (usually root:adm 0640).
+# Remove this line if your distro has no 'adm' group — systemd fails the unit if
+# a SupplementaryGroups entry does not exist.
+SupplementaryGroups=adm
+EnvironmentFile=-/etc/agentwall-scorer.env
+Environment=PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/agentwall/.venv/bin/python3 \
+    /opt/agentwall/scorer/agentwall_scorer.py \
+    --log /var/log/nginx/agentwall_access.log \
+    --use-xff \
+    --state /var/lib/agentwall/model.pkl \
+    --metrics-port 9101 \
+    --metrics-bind 127.0.0.1 \
+    --log-level INFO
+# ExecStart (Phase 3, Redis backend — preferred; rollback = re-enable the one above):
+#ExecStart=/opt/agentwall/.venv/bin/python3 /opt/agentwall/scorer/agentwall_scorer.py --log /var/log/nginx/agentwall_access.log --use-xff --enforce --backend redis --state /var/lib/agentwall/model.pkl --metrics-port 9101 --metrics-bind 127.0.0.1 --log-level INFO
+# ExecStart (Phase 3, fail2ban backend — requires NoNewPrivileges=false + sudoers):
+#ExecStart=/opt/agentwall/.venv/bin/python3 /opt/agentwall/scorer/agentwall_scorer.py --log /var/log/nginx/agentwall_access.log --use-xff --enforce --backend fail2ban --fail2ban-sudo --jail agentwall-ml --state /var/lib/agentwall/model.pkl --log-level INFO
+Restart=always
+RestartSec=3
+
+# --- Hardening (least privilege: read logs, talk to Redis, write only state) --
+# NOTE: NoNewPrivileges=true blocks setuid helpers, so `sudo` — and therefore
+# --fail2ban-sudo — will NOT work while it is true. Keep it true and use the
+# Redis backend. If you need the fail2ban backend, set this to false and rely on
+# the narrow command allowlist in deploy/sudoers.d-agentwall instead.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/agentwall
+StateDirectory=agentwall
+UMask=0027
+MemoryMax=1G
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,84 @@
+# =============================================================================
+# deploy/logrotate/agentwall — log rotation for the agentwall access log
+# -----------------------------------------------------------------------------
+# Install (this file is a drop-in snippet, not a main config):
+#   sudo install -m 0644 deploy/logrotate/agentwall /etc/logrotate.d/agentwall
+#
+# The scorer (scorer/agentwall_scorer.py) and the fail2ban `agentwall-ml`
+# jail both read /var/log/nginx/agentwall_access.log continuously, so rotation MUST
+# reopen the writer (nginx) and MUST keep the same path in place (create, not
+# just rename) or the scorer tails a dead inode.
+#
+# After changing this file:
+#   sudo logrotate -d /etc/logrotate.d/agentwall     # dry run, no changes
+#   sudo logrotate -f /etc/logrotate.d/agentwall     # force one rotation to test
+#   wc -l /var/log/nginx/agentwall_access.log*       # new file + .1.gz should exist
+#
+# Notes:
+#   * create 0640 root adm keeps the file readable by the `adm` group; the
+#     systemd scorer unit joins SupplementaryGroups=adm and fail2ban runs as root.
+#     Remove/replace it if your distro has no `adm` group.
+#   * nginx reopens its logs on USR1 (not HUP). The pid path is /run/nginx.pid
+#     on RHEL-family and /var/run/nginx.pid on Debian/Ubuntu (/var/run -> /run);
+#     adjust if your unit uses a custom PidFile or OpenResty runs under a
+#     different unit name.
+#   * daily + rotate 14 gives ~2 weeks of queryable history (current + 14
+#     compressed rotations). Increase if fail2ban/incident review needs more.
+# =============================================================================
+
+/var/log/nginx/agentwall_access.log {
+    daily
+    rotate 14
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0640 root adm
+    # One shared script for the (single) file; harmless today and correct if
+    # more vhosts are added to this stanza later.
+    sharedscripts
+    postrotate
+        # Reopen the access log. nginx/OpenResty keeps writing to the rotated
+        # inode until it receives USR1, so skipping this would leave the scorer
+        # and fail2ban following a file that is no longer being appended.
+        # Guarded so a stopped/reloading proxy does not make logrotate fail (and
+        # therefore skip the remaining logs in the same run).
+        if [ -s /var/run/nginx.pid ]; then
+            kill -USR1 "$(cat /var/run/nginx.pid)" 2>/dev/null || true
+        fi
+    endscript
+}
+
+# -----------------------------------------------------------------------------
+# Apache variant — use this stanza INSTEAD of the one above when agentwall_access.log
+# is written by Apache/httpd (waf/apache-agentwall.conf). Apache ignores
+# USR1 for reopening; use a graceful reload instead (not a hard restart, which
+# would drop in-flight connections):
+#
+# /var/log/apache2/agentwall_access.log {
+#     daily
+#     rotate 14
+#     missingok
+#     notifempty
+#     compress
+#     delaycompress
+#     create 0640 root adm
+#     sharedscripts
+#     postrotate
+#         # graceful reload: Apache closes and reopens its log files
+#         systemctl reload apache2 2>/dev/null \
+#             || apachectl graceful 2>/dev/null \
+#             || true
+#     endscript
+# }
+#
+# CentOS/RHEL uses /var/log/httpd/agentwall_access.log and `systemctl reload httpd`.
+# -----------------------------------------------------------------------------
+# FAIL2BAN — keep `backend = auto` (the fail2ban default) for the agentwall-ml jail
+# so it follows this rotation reliably: auto lets fail2ban detect the rename and
+# reopen the log. Do NOT pin the jail to a backend that cannot follow rotation,
+# and if the jail ever stops seeing new failures after rotation, try
+# `backend = polling` (see fail2ban/README.md). Verify after a forced rotation:
+#   fail2ban-client status agentwall-ml      # File list must name agentwall_access.log
+#   fail2ban-client get agentwall-ml logpath # must be the live path, not .1.gz
+# -----------------------------------------------------------------------------

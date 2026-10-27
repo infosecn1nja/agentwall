@@ -1,0 +1,86 @@
+# =============================================================================
+# deploy/prometheus/scrape.example.yml — how to scrape the agentwall scorer
+# -----------------------------------------------------------------------------
+# The scorer exposes a plain-text Prometheus endpoint (--metrics-port, 9101 in
+# the shipped systemd unit / compose file) plus /healthz. The endpoint has NO
+# authentication and NO TLS: it is meant for a loopback scrape by a Prometheus
+# on the SAME host.
+#
+#   systemd (deploy/agentwall-scorer.service): --metrics-bind 127.0.0.1
+#   compose (deploy/docker-compose.yml):     "127.0.0.1:9101:9101"
+#
+# Add the `scrape_configs` job below to your prometheus.yml and point
+# `rule_files` at deploy/prometheus/agentwall.rules.yml, e.g.:
+#
+#   global:
+#     scrape_interval: 15s
+#     evaluation_interval: 15s
+#   rule_files:
+#     - /etc/prometheus/rules/agentwall.rules.yml
+#   alerting:
+#     alertmanagers:
+#       - static_configs:
+#           - targets: ["127.0.0.1:9093"]
+#   scrape_configs:
+#     ... the job below ...
+#
+# Install and reload:
+#   sudo install -d -m 0755 /etc/prometheus/rules
+#   sudo install -m 0644 deploy/prometheus/agentwall.rules.yml /etc/prometheus/rules/
+#   promtool check config /etc/prometheus/prometheus.yml
+#   promtool check rules /etc/prometheus/rules/agentwall.rules.yml
+#   sudo systemctl reload prometheus
+#
+# SECURITY / NETWORKING — read before changing the target:
+#   * Keep the scorer and Prometheus on loopback (127.0.0.1). The /metrics body
+#     exposes traffic volume and detection decisions, not secrets, but it is
+#     still enemy reconnaissance data.
+#   * Do NOT publish 9101 on 0.0.0.0 or through the CDN/LB. The compose file
+#     binds it to 127.0.0.1 for exactly this reason. If the endpoint is ever
+#     bound to a routable address, firewall it to the Prometheus host only
+#     (nftables/iptables) and keep the port off the public interface.
+#   * If Prometheus runs on another host, scrape over an encrypted tunnel
+#     (WireGuard/SSH tunnel) or front /metrics with an mTLS reverse proxy. For
+#     that, uncomment `scheme: https` and `tls_config` below and point the
+#     target at the proxy; do not expose plain HTTP across a network.
+#   * The scorer's --metrics-bind default is 127.0.0.1. Docker must therefore
+#     keep the published port bound to loopback (as it does in the shipped
+#     compose file).
+# =============================================================================
+
+scrape_configs:
+  # Job name is referenced by every rule in deploy/prometheus/agentwall.rules.yml
+  # (job="agentwall-scorer"). Keep them in sync if you rename it.
+  - job_name: agentwall-scorer
+    # 15s matches the recommended global scrape_interval. The scorer does not
+    # need sub-minute resolution; its work is per-log-line, not per-request.
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    metrics_path: /metrics
+    scheme: http
+    static_configs:
+      - targets:
+          - "127.0.0.1:9101"
+        labels:
+          # Convenience labels for dashboards; the shipped alert rules only
+          # rely on job="agentwall-scorer" and do not depend on these.
+          service: agentwall
+          component: scorer
+          env: production
+
+    # --- Alternative: HTTPS + mTLS via a local reverse proxy (uncomment) -----
+    # scheme: https
+    # tls_config:
+    #   ca_file: /etc/prometheus/certs/agentwall-metrics-ca.pem
+    #   cert_file: /etc/prometheus/certs/prometheus-client.pem
+    #   key_file: /etc/prometheus/certs/prometheus-client-key.pem
+    #   server_name: agentwall-metrics.internal
+    # # If the proxy enforces basic auth as well:
+    # basic_auth:
+    #   username: prometheus
+    #   password_file: /etc/prometheus/agentwall-metrics.pass
+
+# -----------------------------------------------------------------------------
+# Optional: a separate scrape for /healthz is not needed — `up` already tells
+# you whether the endpoint answers, and AgentWallScorerDown alerts on it.
+# -----------------------------------------------------------------------------
