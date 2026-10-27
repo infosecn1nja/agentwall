@@ -102,8 +102,8 @@ Verify before traffic:
 ```bash
 ./deploy/preflight.sh --use-xff --backend redis   # log format, secrets, config regressions
 ./deploy/validate-linux.sh                        # systemd/fail2ban/Apache/OpenResty in Docker
-./tests/run-tests.sh                              # 72 Python + 211 Lua assertions
-./tests/e2e-real/run.sh                           # real 403/challenge/headless/agent profiles (63 assertions)
+./tests/run-tests.sh                              # 81 Python + 219 Lua assertions
+./tests/e2e-real/run.sh                           # real 403/challenge/headless/agent profiles (64 assertions)
 ```
 
 Then roll out in stages — shadow (dry-run) → challenge-only → enforce. Do not

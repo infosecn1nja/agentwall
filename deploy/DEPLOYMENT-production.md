@@ -59,9 +59,13 @@ Notes that matter in production:
   reaches the challenge/block Lua. Size `burst` so one challenged browser can
   load the interstitial and follow its redirect.
 - `real_ip` is not optional behind a CDN: fail2ban reads the **first log field**
-  (`$remote_addr`/`%a`) and cannot see the `xff=` tail. If the edge does not
-  rewrite the client IP, the jails ban the CDN. The scorer can read `xff=` with
-  `--use-xff`, but that only fixes the scorer, not fail2ban.
+  (`$remote_addr`/`%a`) and cannot see the `xff=` tail. With real_ip configured,
+  run the scorer **without** `--use-xff` (the first field is already the client).
+  Do not parse the raw XFF tail in that topology: the left-most hop is
+  attacker-controlled, and a mismatch between the scorer's key and the Lua's
+  `$remote_addr` key silently disables enforcement. If real_ip is unavailable,
+  `--use-xff` requires `--trust-proxies <proxy CIDRs>` (right-to-left,
+  skipping trusted hops) and fail2ban remains unsafe behind a CDN.
 - The Lua layer needs OpenResty (or nginx + lua-nginx-module + lua-resty-redis)
   and a Redis password supplied through nginx `env` declarations. See
   [`nginx-lua/README.md`](../nginx-lua/README.md) §2.
@@ -143,7 +147,7 @@ Secrets belong in the environment, never in unit files or the repo:
 - [ ] Edge config installed from [`deploy/nginx.conf.example`](nginx.conf.example)
       (edit every `<-- EDIT`) and `openresty -t` passes; or the `waf/` snippet
       merged into an existing config with `real_ip` configured.
-- [ ] `bash deploy/preflight.sh --use-xff` → no FAIL.
+- [ ] `bash deploy/preflight.sh` → no FAIL.
 - [ ] `bash deploy/validate-linux.sh` → 0 FAIL (systemd unit, fail2ban
       `-t`/`fail2ban-regex`, Apache `-t`, OpenResty `-t`).
 - [ ] `bash tests/run-tests.sh` → ALL CHECKS PASSED.
@@ -151,7 +155,7 @@ Secrets belong in the environment, never in unit files or the repo:
       the repo; logrotate installed.
 - [ ] CI green (unit + preflight + linux-config + e2e-real).
 - [ ] Optional but recommended: `bash tests/e2e-real/run.sh` (Docker; real
-      403/challenge/headless + agent profiles against real Redis + OpenResty + the real scorer) → 63/63 PASS.
+      403/challenge/headless + agent profiles against real Redis + OpenResty + the real scorer) → 64/64 PASS.
 - [ ] Run the scorer with `--enforce` **off** for at least a full weekly cycle,
       including a traffic peak.
 
@@ -256,10 +260,12 @@ reset suspicion. Two caveats:
   the raw client IP). For IPv6 enforcement prefer `--backend redis` or an
   explicit nftables/ipset prefix rule. Documented in `fail2ban/README.md`.
 
-With `--use-xff`, XFF is only as trustworthy as the edge: a client-supplied
-header must be stripped/overwritten by the CDN/LB, otherwise an attacker spoofs
-an allowlisted or victim IP. The scorer warns when 1000 parsed lines carry no
-`xff=` field, but it cannot detect a lying edge.
+The default topology uses real_ip and the scorer reads the log's first field;
+do **not** enable `--use-xff` there. If you must parse XFF (no real_ip), pass
+`--trust-proxies <proxy CIDRs>`; the scorer walks the chain right-to-left and
+skips trusted hops, so a spoofed left-most value cannot poison allowlists or
+verdict keys. A trusted proxy that does not append/strip XFF is still a
+configuration risk outside the scorer's control.
 
 ---
 
@@ -304,7 +310,7 @@ Key series and what to alert on:
 |--------|---------|-----------|
 | `agentwall_events_total` / `agentwall_learned_total` | throughput / model updates | sudden drop = log or scorer stall |
 | `agentwall_parse_errors_total` | log lines the parser rejected | ratio spike = log_format drift |
-| `agentwall_xff_missing_warnings_total` | `--use-xff` but the log has no `xff=` | >0 = IP correctness broken |
+| `agentwall_xff_missing_warnings_total` | `--use-xff` but the log has no `xff=` | >0 = XFF mode misconfigured (prefer real_ip + no `--use-xff`) |
 | `agentwall_block_total` / `agentwall_hard_block_total` | blocks (all vs hard-signal) | rate spike = attack or FP storm |
 | `agentwall_challenge_total` / `agentwall_cleared_total` | challenge issued vs passed | pass ratio collapse = challenge broken |
 | `agentwall_headless_total` | challenged clients marked headless/automation (reads `agentwall:headless:*`) | sustained detections = automated pentest/scanner wave; alert rule `AgentWallHeadlessDetected` |
@@ -383,12 +389,13 @@ degrades to "rate-limit + WAF + fail2ban only".
 
 - [ ] real_ip configured; the log's first field is the true client IP
       (`sudo -u agentwall head -1 /var/log/nginx/agentwall_access.log`).
-- [ ] `agentwall` log format includes `ua_flag=`, `probe=`, `xff=`; `--use-xff`
-      matches the deployment mode.
+- [ ] `agentwall` log format includes `ua_flag=`, `probe=`, `xff=`.
+- [ ] Topology decision recorded: real_ip + scorer **without** `--use-xff`
+      (default), or no real_ip + `--use-xff --trust-proxies <CIDRs>`.
 - [ ] Good-bot FCrDNS verification on; CDN/monitoring/scanner CIDRs allowlisted.
 - [ ] Redis private + `requirepass`; `AGENTWALL_REDIS_PASS` and `AGENTWALL_CHAL_SECRET`
       declared in nginx.conf and present in the environment.
-- [ ] `bash deploy/preflight.sh --use-xff` → 0 FAIL (add `--backend redis`
+- [ ] `bash deploy/preflight.sh` → 0 FAIL (add `--backend redis`
       and, at phase 3, `--phase 3`).
 - [ ] `bash tests/run-tests.sh` → ALL CHECKS PASSED (CI gate).
 - [ ] Phase 1 shadow ran across a full weekly cycle incl. a traffic peak;

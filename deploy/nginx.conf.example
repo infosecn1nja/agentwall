@@ -14,8 +14,10 @@
 #   -> app_backend
 #
 # The access log below is what the Python scorer and fail2ban consume. Keep the
-# leading fields exactly as they are, and keep `xff="..."` — the scorer needs it
-# when running with --use-xff.
+# leading fields exactly as they are. With real_ip configured, the scorer reads
+# the FIRST field and must run WITHOUT --use-xff (the raw xff tail is
+# attacker-controlled). Keep `xff="..."` only for diagnostics/fail2ban-adjacent
+# logging or a deliberate --use-xff --trust-proxies setup.
 # =============================================================================
 
 # ---------------------------------------------------------------------------
@@ -154,7 +156,8 @@ http {
 
     # --- access log consumed by the scorer + fail2ban -----------------------
     # Keep the combined-format leading fields; only append after them.
-    # ua_flag/probe come from the maps above; xff is required for --use-xff.
+    # ua_flag/probe come from the maps above; xff is diagnostic unless the scorer
+# explicitly runs with --use-xff --trust-proxies (not the default).
     log_format agentwall '$remote_addr - $remote_user [$time_local] '
                      '"$request" $status $body_bytes_sent '
                      '"$http_referer" "$http_user_agent" '

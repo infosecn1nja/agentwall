@@ -22,8 +22,10 @@ start loose, watch `fail2ban-client status`, then tighten.
 ## 0) THE IP-SOURCE TRAP — read this before enabling anything
 
 **fail2ban extracts `<HOST>` from the FIRST field of the access log**
-(`nginx $remote_addr` / Apache `%a`). The ML scorer is different: with
-`--use-xff` it reads the `xff="..."` tail and takes the left-most hop.
+(`nginx $remote_addr` / Apache `%a`). The ML scorer should normally read that
+same first field. If XFF parsing is enabled (`--use-xff`), it now **requires**
+`--trust-proxies` and walks the chain right-to-left, skipping trusted hops — the
+left-most value is never trusted.
 
 That mismatch is a foot-gun behind a CDN/L7 load balancer:
 
@@ -31,7 +33,7 @@ That mismatch is a foot-gun behind a CDN/L7 load balancer:
 client 203.0.113.7 -> CDN -> your nginx (logs 198.51.100.23 = CDN)
 ```
 
-- the scorer (`--use-xff`) scores **203.0.113.7** (the real client) — good;
+- the scorer (with real_ip, no `--use-xff`) scores the first field — good;
 - fail2ban sees only the first field **198.51.100.23** and bans the **CDN** —
   every user behind it is blocked, i.e. self-inflicted outage.
 
@@ -52,7 +54,7 @@ RemoteIPTrustedProxy 198.51.100.0/24
 
 Then in **Mode A** (recommended) the first log field is the real client, fail2ban
 bans the right IP, and the scorer should be run **without** `--use-xff`. In
-**Mode B** (no real_ip, scorer with `--use-xff`) fail2ban is **unsafe** — do not
+**Mode B** (no real_ip) fail2ban is **unsafe** — do not
 point these jails at that log.
 
 Also: your edge must **overwrite** (not blindly append) client-supplied XFF, and
@@ -192,7 +194,7 @@ The scorer acts on a source IP only when run with `--enforce`, e.g.:
 
 ```bash
 python3 agentwall_scorer.py --log /var/log/nginx/agentwall_access.log \
-    --use-xff --enforce --backend fail2ban --jail agentwall-ml
+    --enforce --backend fail2ban --jail agentwall-ml
 ```
 
 Each block runs:

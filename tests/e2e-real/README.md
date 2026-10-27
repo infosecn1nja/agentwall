@@ -33,7 +33,7 @@ AGENTWALL_E2E_VENV=/path/to/venv bash tests/e2e-real/run.sh
 Exit code 0 = every check passed. Logs and the served challenge pages are kept
 in the printed work directory (`$TMPDIR/agentwall-e2e.*`).
 
-## What it checks (63 assertions)
+## What it checks (64 assertions)
 
 | Group | Proves |
 |-------|--------|
@@ -48,6 +48,9 @@ in the printed work directory (`$TMPDIR/agentwall-e2e.*`).
 
 - `set_real_ip_from 0.0.0.0/0` + `real_ip_header X-Forwarded-For`: the only way
   to act as many client IPs from one host. **Never** do this in production.
+  The scorer in the test reads the log's first field (already the test client)
+  and runs **without** `--use-xff`; production uses the same default with a
+  narrow real_ip trust range.
 - Plain HTTP inside the test: the `Secure` clearance cookie still works because
   we replay it manually; browsers need HTTPS for `crypto.subtle`.
 - `AGENTWALL_POW_DIFF=3`: faster PoW so the test finishes in seconds.

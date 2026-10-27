@@ -40,9 +40,28 @@ class ParseLineTests(unittest.TestCase):
         self.assertFalse(event["is_tool"])
         self.assertFalse(event["has_ref"])
 
-    def test_with_xff_uses_leftmost_hop(self):
-        event = s.parse_line(self.NGINX, use_xff=True)
+    def test_xff_from_untrusted_peer_never_spoofs(self):
+        # Direct client (not a trusted proxy) sends a forged XFF: the socket peer
+        # must win, regardless of what the left-most hop claims.
+        event = s.parse_line(self.NGINX, use_xff=True,
+                             trusted_proxies=s.parse_trusted_proxies("10.0.0.0/8"))
+        self.assertEqual(event["ip"], "203.0.113.7")
+
+    def test_xff_trusted_proxy_uses_rightmost_untrusted_hop(self):
+        # Our edge (10.0.0.5) appends the real client; a spoofed 127.0.0.1 at the
+        # left must be ignored.
+        line = ('10.0.0.5 - - [27/Oct/2026:20:46:24 +0700] "GET / HTTP/1.1" 200 1 "-" "curl/8" '
+                'rt=0 urt=0 ua_flag=0 probe=0 xff="127.0.0.1, 198.51.100.9"')
+        event = s.parse_line(line, use_xff=True,
+                             trusted_proxies=s.parse_trusted_proxies("10.0.0.0/8"))
         self.assertEqual(event["ip"], "198.51.100.9")
+
+    def test_xff_all_hops_trusted_falls_back_to_socket(self):
+        line = ('10.0.0.5 - - [27/Oct/2026:20:46:24 +0700] "GET / HTTP/1.1" 200 1 "-" "curl/8" '
+                'rt=0 urt=0 ua_flag=0 probe=0 xff="10.1.2.3"')
+        event = s.parse_line(line, use_xff=True,
+                             trusted_proxies=s.parse_trusted_proxies("10.0.0.0/8"))
+        self.assertEqual(event["ip"], "10.0.0.5")
 
     def test_combined_format_fallback(self):
         line = ('198.51.100.9 - - [27/Oct/2026:20:46:24 +0700] "GET /?id=1%27%20or%201%3D1 HTTP/1.1" '
@@ -59,9 +78,12 @@ class ParseLineTests(unittest.TestCase):
         self.assertEqual(s.parse_line(line, use_xff=True)["ip"], "203.0.113.7")
 
     def test_xff_mapped_ipv4_is_canonicalised(self):
-        line = ('203.0.113.7 - - [27/Oct/2026:20:46:24 +0700] "GET / HTTP/1.1" 200 1 "-" "curl/8" '
+        line = ('10.0.0.5 - - [27/Oct/2026:20:46:24 +0700] "GET / HTTP/1.1" 200 1 "-" "curl/8" '
                 'rt=0 urt=0 ua_flag=0 probe=0 xff="::ffff:192.0.2.5"')
-        self.assertEqual(s.parse_line(line, use_xff=True)["ip"], "192.0.2.5")
+        self.assertEqual(
+            s.parse_line(line, use_xff=True,
+                        trusted_proxies=s.parse_trusted_proxies("10.0.0.0/8"))["ip"],
+            "192.0.2.5")
 
     def test_garbage_line_returns_none(self):
         self.assertIsNone(s.parse_line("not an access log line"))
@@ -258,6 +280,23 @@ class StateTests(unittest.TestCase):
                 fh.write(b"this is not a pickle")
             self.assertIsNone(s.load_state(path))
 
+    def test_state_file_is_written_0600(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "model.pkl")
+            s.save_state({"x": 1}, path)
+            mode = os.stat(path).st_mode & 0o777
+            self.assertEqual(mode, 0o600, oct(mode))
+
+    def test_symlinked_state_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "target.pkl")
+            with open(target, "wb") as fh:
+                import pickle
+                pickle.dump({"legacy": True}, fh)
+            link = os.path.join(tmp, "link.pkl")
+            os.symlink(target, link)
+            self.assertIsNone(s.load_state(link))
+
     def test_legacy_bare_model_checkpoint_loads(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "model.pkl")
@@ -301,9 +340,16 @@ class ValidationTests(unittest.TestCase):
                      ["--log", "x", "--human-floor", "1.5"]):
             self.assertTrue(self.errors(argv), argv)
 
+    def test_use_xff_requires_trusted_proxies(self):
+        self.assertTrue(self.errors(["--log", "x", "--use-xff"]))
+        self.assertFalse(self.errors([
+            "--log", "x", "--use-xff", "--trust-proxies", "10.0.0.0/8,192.0.2.0/24"]))
+        self.assertTrue(self.errors([
+            "--log", "x", "--use-xff", "--trust-proxies", "not-a-cidr"]))
+
     def test_full_command_line_parses(self):
         parser, args = self.parse([
-            "--log", "/var/log/nginx/agentwall_access.log", "--use-xff", "--enforce",
+            "--log", "/var/log/nginx/agentwall_access.log", "--enforce",
             "--backend", "redis", "--profile", "api", "--ipv6-prefix", "64",
             "--metrics-port", "9101", "--metrics-bind", "0.0.0.0",
             "--fail2ban-sudo", "--state", "/var/lib/agentwall/model.pkl",
@@ -342,6 +388,28 @@ class ActionerTests(unittest.TestCase):
 
     def test_headless_marker_redis_error_fails_open(self):
         self.assertFalse(self.make_actioner(self.BrokenRedis()).is_headless("203.0.113.7"))
+
+
+class GoodBotQueueTests(unittest.TestCase):
+    def test_saturated_fcrdns_queue_sheds_instead_of_queueing(self):
+        verifier = s.GoodBotVerifier(workers=1, max_pending=1)
+        self.assertTrue(verifier._pending.acquire(blocking=False))
+        try:
+            self.assertFalse(verifier.is_good_bot("203.0.113.9", "Mozilla/5.0 Googlebot/2.1"))
+        finally:
+            verifier._pending.release()
+        self.assertIn("203.0.113.9", verifier.cache)
+
+    def test_fcrdns_lookup_releases_its_slot(self):
+        verifier = s.GoodBotVerifier(workers=1, max_pending=1)
+        original = s.GoodBotVerifier._verify
+        s.GoodBotVerifier._verify = staticmethod(lambda ip: True)
+        try:
+            self.assertTrue(verifier.is_good_bot("203.0.113.10", "Mozilla/5.0 Googlebot/2.1"))
+        finally:
+            s.GoodBotVerifier._verify = original
+        self.assertTrue(verifier._pending.acquire(blocking=False))
+        verifier._pending.release()
 
 
 class BatchAndModelTests(unittest.TestCase):

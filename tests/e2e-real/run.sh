@@ -304,7 +304,7 @@ echo "=== D. REAL scorer (river + redis) -> Redis -> OpenResty ==="
 rm -f "$WORK/state/model.pkl"
 : > "$WORK/logs/agentwall_access.log"
 PYTHONUNBUFFERED=1 "$PY" "$REPO_ROOT/scorer/agentwall_scorer.py" \
-    --log "$WORK/logs/agentwall_access.log" --use-xff --enforce --backend redis \
+    --log "$WORK/logs/agentwall_access.log" --enforce --backend redis \
     --redis-url "redis://:${REDIS_PASS}@127.0.0.1:${REDIS_PORT}/0" \
     --warmup 0 --min-events 1 --cooldown 0 --challenge-grace 5 \
     --floor-block 0.15 --floor-watch 0.05 --p-block 0.99 --p-watch 0.95 \
@@ -323,8 +323,11 @@ else
 fi
 "$PY" -c 'import time; time.sleep(0.6)'   # let tail() open+seek before we append
 
-echo "203.0.113.30 - - [$(ts)] \"GET /admin/login HTTP/1.1\" 404 12 \"-\" \"curl/8.4.0\" rt=0.001 urt=0.001 ua_flag=1 probe=1 xff=\"203.0.113.30\"" >> "$WORK/logs/agentwall_access.log"
+# First log field is the real client; the xff tail is a forged loopback value.
+# The scorer runs WITHOUT --use-xff and must key on the first field only.
+echo "203.0.113.30 - - [$(ts)] \"GET /admin/login HTTP/1.1\" 404 12 \"-\" \"curl/8.4.0\" rt=0.001 urt=0.001 ua_flag=1 probe=1 xff=\"127.0.0.1\"" >> "$WORK/logs/agentwall_access.log"
 if wait_key agentwall:block:203.0.113.30 30; then ok "D1 scorer wrote agentwall:block from the real log line"; else bad "D1 scorer did not write the block key"; fi
+[ "$(rdb exists agentwall:block:127.0.0.1)" = "0" ] && ok "D1b spoofed xff=127.0.0.1 did not become the verdict key" || bad "D1b scorer trusted the left-most xff"
 check 403 "$(code 203.0.113.30)" "D2 OpenResty enforces the scorer's real block (403)"
 ttl=$(rdb ttl agentwall:block:203.0.113.30)
 [ "$ttl" -gt 250 ] && [ "$ttl" -le 300 ] && ok "D3 block TTL honours --block-ttl (${ttl}s)" || bad "D3 unexpected TTL=$ttl"

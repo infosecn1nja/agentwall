@@ -167,7 +167,42 @@ def ip_key(ip, ipv6_prefix=64):
     return str(addr)
 
 
-def parse_line(line, use_xff=False):
+def is_trusted_ip(ip, trusted_nets):
+    try:
+        addr = ipaddress.ip_address(ip)
+    except (ValueError, TypeError):
+        return False
+    return any(addr in net for net in trusted_nets)
+
+
+def resolve_client_ip(remote_ip, xff, trusted_nets):
+    """Resolve the real client from an access-log line.
+
+    The log's first field is already the real client when the edge runs
+    ``real_ip``/``mod_remoteip``. When that is not available, XFF must be parsed
+    **right-to-left, skipping trusted proxy hops** (the same rule nginx uses
+    with ``real_ip_recursive on``). The left-most hop is attacker-controlled and
+    must never be trusted.
+    """
+    peer = canonical_ip(remote_ip)
+    if not xff:
+        return peer or remote_ip
+    trusted_nets = tuple(trusted_nets or ())
+    hops = []
+    for part in xff.split(","):
+        addr = canonical_ip(part.strip())
+        if addr is not None:
+            hops.append(addr)
+    chain = hops + ([peer] if peer else [])
+    for candidate in reversed(chain):
+        if not is_trusted_ip(candidate, trusted_nets):
+            return candidate
+    # Every hop (including the socket peer) is a trusted proxy: we cannot see a
+    # client address, so fall back to the socket peer rather than guessing.
+    return peer or remote_ip
+
+
+def parse_line(line, use_xff=False, trusted_proxies=None):
     """Return an event dict, or None if the line cannot be parsed."""
     m = LOG_RE.match(line)
     if not m:
@@ -184,13 +219,8 @@ def parse_line(line, use_xff=False):
 
     ip = g["ip"]
     xff = g.get("xff")
-    if use_xff and xff:
-        # Left-most hop is the original client *only* when the edge strips
-        # client-supplied XFF and appends the real one (nginx real_ip module).
-        first = xff.split(",")[0].strip()
-        client = canonical_ip(first)
-        if client is not None:
-            ip = client
+    if use_xff:
+        ip = resolve_client_ip(ip, xff, trusted_proxies or ())
 
     path = g["path"] or ""
     stem = path.split("?", 1)[0]
@@ -229,7 +259,7 @@ class GoodBotVerifier:
     """
 
     def __init__(self, ttl=3600.0, negative_ttl=300.0, timeout=0.8, enabled=True,
-                 workers=4, metrics=None):
+                 workers=4, max_pending=None, metrics=None):
         self.ttl = ttl
         self.negative_ttl = negative_ttl
         self.timeout = timeout
@@ -237,6 +267,10 @@ class GoodBotVerifier:
         self.metrics = metrics
         self.cache = {}  # ip -> (bool, expiry)
         self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="fcrdns")
+        # A timed-out .result() does NOT cancel the DNS task, so an attacker
+        # flooding distinct IPs with a good-bot UA could otherwise grow the
+        # executor queue without bound. Shed new lookups when saturated.
+        self._pending = threading.BoundedSemaphore(max_pending or workers * 4)
 
     def is_good_bot(self, ip, ua):
         if not self.enabled or not GOODBOT_UA_RE.search(ua):
@@ -246,9 +280,23 @@ class GoodBotVerifier:
         if hit and hit[1] > now:
             return hit[0]
 
+        if not self._pending.acquire(blocking=False):
+            # Saturated: fail closed for verification (treat as not-a-good-bot)
+            # and cache the short negative result to avoid a retry storm.
+            self.cache[ip] = (False, now + 30.0)
+            if self.metrics:
+                self.metrics.inc("agentwall_dns_shed_total")
+            return False
+
         ok = False
         try:
-            ok = bool(self._pool.submit(self._verify, ip).result(timeout=self.timeout))
+            future = self._pool.submit(self._verify, ip)
+        except RuntimeError:  # executor shut down
+            self._pending.release()
+            return False
+        future.add_done_callback(lambda _f: self._pending.release())
+        try:
+            ok = bool(future.result(timeout=self.timeout))
         except FuturesTimeoutError:
             ok = False
             if self.metrics:
@@ -642,21 +690,63 @@ class Allowlist:
 
 
 # --- State persistence (atomic, guarded) -------------------------------------
-def save_state(model, path):
-    """Write the model checkpoint atomically (tmp file + os.replace)."""
+def _secure_state_dir(path):
+    """Create/validate the state directory and warn if it is group/other writable.
+
+    The checkpoint is a pickle (deserialisation = code execution). The state
+    directory must be owned by the scorer user and not writable by anyone else;
+    the file is written 0600. This is a defence-in-depth check, not a sandbox.
+    """
     directory = os.path.dirname(os.path.abspath(path))
-    os.makedirs(directory, exist_ok=True)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    try:
+        st = os.stat(directory)
+        if st.st_mode & 0o077:
+            logging.warning("state directory %s is group/other accessible (mode %o); "
+                            "the pickle checkpoint is code-executable -- set it to 0700",
+                            directory, st.st_mode & 0o777)
+        if st.st_uid != os.getuid():
+            logging.warning("state directory %s is owned by uid %s, not the scorer uid %s",
+                            directory, st.st_uid, os.getuid())
+    except OSError:
+        pass
+    return directory
+
+
+def save_state(model, path):
+    """Write the model checkpoint atomically (tmp file + os.replace, mode 0600)."""
+    _secure_state_dir(path)
     tmp = "{}.tmp.{}".format(path, os.getpid())
-    with open(tmp, "wb") as fh:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as fh:
         pickle.dump({"version": STATE_VERSION, "model": model}, fh,
                     protocol=pickle.HIGHEST_PROTOCOL)
     os.replace(tmp, path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 def load_state(path):
-    """Load a checkpoint; return None (fresh model) instead of crashing."""
+    """Load a checkpoint; return None (fresh model) instead of crashing.
+
+    Refuses symlinks (a symlink could redirect the pickle load elsewhere) and
+    warns when the file/directory permissions are too open. Pickle loads are
+    code execution, so the state path must be trusted and 0700/0600.
+    """
     if not path or not os.path.exists(path):
         return None
+    if os.path.islink(path):
+        logging.error("refusing to load state %s: it is a symlink", path)
+        return None
+    try:
+        st = os.stat(path)
+        if st.st_mode & 0o077:
+            logging.warning("state file %s is group/other accessible (mode %o); "
+                            "set it to 0600", path, st.st_mode & 0o777)
+    except OSError:
+        pass
     try:
         with open(path, "rb") as fh:
             blob = pickle.load(fh)
@@ -741,7 +831,12 @@ def build_argparser():
                     help="process the log from the beginning to EOF once, then exit "
                          "(batch backfill / benchmarking; implies --from-start)")
     ap.add_argument("--use-xff", action="store_true",
-                    help="use left-most X-Forwarded-For as client IP (only with a real_ip edge)")
+                    help="resolve the client from X-Forwarded-For; REQUIRES --trust-proxies. "
+                         "Do NOT use when nginx real_ip/mod_remoteip already rewrites the "
+                         "first log field (the default topology)")
+    ap.add_argument("--trust-proxies", default=os.environ.get("AGENTWALL_TRUSTED_PROXIES", ""),
+                    help="comma-separated CIDRs of your own edge proxies for --use-xff; XFF is "
+                         "walked right-to-left skipping these hops (the left-most value is never trusted)")
     ap.add_argument("--window", type=float, default=60.0, help="per-IP window seconds")
     ap.add_argument("--min-events", type=int, default=12, help="min events before acting on an IP")
     ap.add_argument("--warmup", type=int, default=800, help="events learned before any action")
@@ -796,6 +891,20 @@ def build_argparser():
     return ap
 
 
+def parse_trusted_proxies(raw):
+    """Parse a comma-separated CIDR list; raises ValueError on a bad entry."""
+    nets = []
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(part, strict=False))
+        except ValueError:
+            raise ValueError("invalid --trust-proxies entry: {}".format(part))
+    return nets
+
+
 def validate_args(args):
     """Return a list of configuration errors (the caller turns them into usage errors)."""
     errors = []
@@ -803,6 +912,15 @@ def validate_args(args):
         errors.append("--enforce and --dry-run are mutually exclusive")
     if args.enforce and args.backend == "none":
         errors.append("--enforce requires --backend redis, fail2ban or both")
+    if args.use_xff:
+        if not (args.trust_proxies or "").strip():
+            errors.append("--use-xff requires --trust-proxies (CIDRs of your edge proxies); "
+                          "with real_ip configured, drop --use-xff entirely")
+        else:
+            try:
+                parse_trusted_proxies(args.trust_proxies)
+            except ValueError as exc:
+                errors.append(str(exc))
     if args.window <= 0:
         errors.append("--window must be > 0")
     if args.min_events < 1:
@@ -877,6 +995,7 @@ def main(argv=None):
         with open(args.allowlist_file) as fh:
             cidrs += fh.read().splitlines()
     allow = Allowlist(cidrs)
+    trusted_proxies = parse_trusted_proxies(args.trust_proxies) if args.use_xff else []
     act = Actioner(args, metrics=metrics)
     verifier = GoodBotVerifier(enabled=not args.no_verify_bots,
                                timeout=args.dns_timeout, metrics=metrics)
@@ -921,8 +1040,12 @@ def main(argv=None):
         args.human_floor, args.profile, args.ipv6_prefix, args.max_ips,
     )
     if args.use_xff:
-        logging.info("--use-xff enabled: trust XFF only if nginx real_ip is configured "
-                     "and strips client-supplied X-Forwarded-For")
+        logging.info("--use-xff enabled with %d trusted proxy range(s): resolving the "
+                     "right-most untrusted XFF hop (left-most is never trusted)",
+                     len(trusted_proxies))
+    else:
+        logging.info("using the access log's first field as the client IP; this is correct "
+                     "when nginx real_ip/mod_remoteip rewrites it")
     if act.enforce and not act.preflight():
         logging.critical("enforcement backend is unreachable; verdicts will be lost until it recovers")
 
@@ -948,7 +1071,7 @@ def main(argv=None):
 
     try:
         for line in _stream():
-            ev = parse_line(line, use_xff=args.use_xff)
+            ev = parse_line(line, use_xff=args.use_xff, trusted_proxies=trusted_proxies)
             metrics.inc("agentwall_events_total")
             parsed += 1
             if ev is None:

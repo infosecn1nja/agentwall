@@ -74,13 +74,14 @@ cut, and the scorer/fail2ban layer is what catches rotated tooling.
 `tests/e2e-real/run.sh` contains the source-derived profiles and asserts:
 
 ```
+D1b spoofed xff=127.0.0.1 did not become the verdict key        PASS
 B16 Strix default sandbox browser profile blocked (403)          PASS
 B17 Strix profile marked headless                                PASS
 F0  normal browser UA allowed                                    PASS
 F0b python-httpx library allowed (false-positive control)        PASS
 F0c ordinary curl UA allowed (false-positive control)            PASS
 F1–F22  ARTEX + Strix scanner/agent default UAs blocked (403)    PASS
-RESULT: PASS=63 FAIL=0
+RESULT: PASS=64 FAIL=0
 ```
 
 The same stack is also exercised against real Redis + OpenResty + the real

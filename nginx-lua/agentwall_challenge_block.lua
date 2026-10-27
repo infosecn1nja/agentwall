@@ -886,6 +886,10 @@ if type(chal_id) ~= "string" then chal_id = nil end
 if type(nonce) ~= "string" then nonce = nil end
 
 if chal_id and nonce then
+    -- Bound before touching Redis (the verify endpoint already does this).
+    if #chal_id > common.CHAL_ID_MAX or #nonce > 10 or not nonce:match("^%d+$") then
+        return issue_challenge(red, ip_key, cfg.pow_diff)
+    end
     local stored, cherr = red:get(common.KEY_CHAL .. chal_id)
     if not stored then
         red:close()

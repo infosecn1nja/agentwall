@@ -256,7 +256,7 @@ say "     env AGENTWALL_REDIS_HOST; env AGENTWALL_REDIS_PORT; env AGENTWALL_REDI
 say ""
 say "4) Verify, then load the go-live self-test (read-only):"
 say "     stat -c '%a %n' \"$OUT_ABS\"/*        # expect 600 for each file"
-say "     bash deploy/preflight.sh --log /var/log/nginx/agentwall_access.log --use-xff"
+say "     bash deploy/preflight.sh --log /var/log/nginx/agentwall_access.log"
 say ""
 say "5) Rotation: re-run with --force, then update Redis/compose/scorer/nginx"
 say "   together. New AGENTWALL_CHAL_SECRET invalidates issued clearance cookies;"

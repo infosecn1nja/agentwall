@@ -433,6 +433,19 @@ falsy("number UA", C.is_automation_ua(123))
 falsy("unrelated UA", C.is_automation_ua("Artemis/1.0 (compatible)"))
 
 -- =============================================================================
+-- safe_relative_path (server-side redirect validation)
+-- =============================================================================
+section("safe_relative_path")
+eq("valid path preserved", C.safe_relative_path("/account?tab=1"), "/account?tab=1")
+eq("absolute url rejected", C.safe_relative_path("https://evil.example/"), "/")
+eq("protocol-relative rejected", C.safe_relative_path("//evil.example/x"), "/")
+eq("backslash trick rejected", C.safe_relative_path("/\\evil.example"), "/")
+eq("control char rejected", C.safe_relative_path("/ok\t/evil"), "/")
+eq("empty rejected", C.safe_relative_path(""), "/")
+eq("strip_pow_args backslash rejected", C.strip_pow_args("/\\evil.example?agentwall_id=x"), "/")
+eq("strip_pow_args keeps safe query", C.strip_pow_args("/page?a=1&agentwall_id=x&agentwall_pow=2"), "/page?a=1")
+
+-- =============================================================================
 -- headless_score
 -- =============================================================================
 section("headless_score")

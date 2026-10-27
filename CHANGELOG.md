@@ -6,6 +6,27 @@ All notable changes to AgentWall are documented here. The format follows
 
 ## [Unreleased]
 
+### Security fixes
+
+- **XFF keying mismatch (H-1):** the scorer no longer trusts the left-most
+  `X-Forwarded-For` hop. `--use-xff` now **requires** `--trust-proxies` and
+  resolves right-to-left skipping trusted hops; shipped compose/Dockerfile/
+  systemd defaults no longer enable `--use-xff` (with real_ip the first log
+  field is authoritative). Tests cover spoofed left-most values, allowlist
+  poisoning and an end-to-end spoofed-XFF log line.
+- **FCrDNS queue bound (M-1):** good-bot verification now sheds lookups when its
+  in-flight queue is saturated instead of growing unbounded (new
+  `agentwall_dns_shed_total` metric).
+- **State-file hardening (M-2):** checkpoint files are written 0600, symlinks
+  are refused, and group/other-accessible state paths trigger warnings; the
+  pickle-as-code-execution risk is documented.
+- **Open-redirect hardening (L-1):** the server validates `next` as a
+  same-origin path (rejects `//`, `\`, control characters) before returning it.
+- **GET-fallback bounds (L-2):** challenge id/nonce are length/format-checked
+  before any Redis lookup.
+- The deprecated v1 scorer is no longer copied into the container image (L-3);
+  the sudoers wildcard trade-off is documented (L-4).
+
 ### Added
 
 - README now documents the detection model explicitly: `river`'s
@@ -53,7 +74,7 @@ fail2ban jails, a streaming ML scorer, and an OpenResty verification layer.
   Redis contract).
 - Test suites at release: 70 Python unit/config tests, 206 Lua assertions, and
   a real Docker end-to-end test (Redis + OpenResty + real scorer, 36 assertions).
-  Unreleased adds the source-derived Strix/ARTEX profiles (63 assertions).
+  Unreleased adds the source-derived Strix/ARTEX profiles (64 assertions).
 - GitHub-ready docs: architecture, threat model, contributing, security policy,
   code of conduct, issue/PR templates, CI workflow, Makefile.
 

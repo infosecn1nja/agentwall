@@ -21,8 +21,8 @@ WORKDIR /app
 COPY scorer/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Scorer code (only what the image needs; see .dockerignore).
-COPY scorer/agentwall_scorer_v1.py       /app/
+# Scorer code (only what the image needs; see .dockerignore). The deprecated
+# v1 reference scorer is kept in the repo but is NOT shipped in the image.
 COPY scorer/agentwall_scorer.py /app/
 
 # Run as non-root (uid 10001, no login). The scorer writes ONLY under /state
@@ -38,4 +38,4 @@ USER agentwall
 # served there; do not expose the port publicly.
 # ENTRYPOINT + compose command => final argv is the compose `command` list.
 ENTRYPOINT ["python3", "agentwall_scorer.py"]
-CMD ["--log", "/logs/agentwall_access.log", "--use-xff", "--log-level", "INFO"]
+CMD ["--log", "/logs/agentwall_access.log", "--log-level", "INFO"]

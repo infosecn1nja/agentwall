@@ -60,15 +60,14 @@ Environment=PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 ExecStart=/opt/agentwall/.venv/bin/python3 \
     /opt/agentwall/scorer/agentwall_scorer.py \
     --log /var/log/nginx/agentwall_access.log \
-    --use-xff \
     --state /var/lib/agentwall/model.pkl \
     --metrics-port 9101 \
     --metrics-bind 127.0.0.1 \
     --log-level INFO
 # ExecStart (Phase 3, Redis backend — preferred; rollback = re-enable the one above):
-#ExecStart=/opt/agentwall/.venv/bin/python3 /opt/agentwall/scorer/agentwall_scorer.py --log /var/log/nginx/agentwall_access.log --use-xff --enforce --backend redis --state /var/lib/agentwall/model.pkl --metrics-port 9101 --metrics-bind 127.0.0.1 --log-level INFO
+#ExecStart=/opt/agentwall/.venv/bin/python3 /opt/agentwall/scorer/agentwall_scorer.py --log /var/log/nginx/agentwall_access.log --enforce --backend redis --state /var/lib/agentwall/model.pkl --metrics-port 9101 --metrics-bind 127.0.0.1 --log-level INFO
 # ExecStart (Phase 3, fail2ban backend — requires NoNewPrivileges=false + sudoers):
-#ExecStart=/opt/agentwall/.venv/bin/python3 /opt/agentwall/scorer/agentwall_scorer.py --log /var/log/nginx/agentwall_access.log --use-xff --enforce --backend fail2ban --fail2ban-sudo --jail agentwall-ml --state /var/lib/agentwall/model.pkl --log-level INFO
+#ExecStart=/opt/agentwall/.venv/bin/python3 /opt/agentwall/scorer/agentwall_scorer.py --log /var/log/nginx/agentwall_access.log --enforce --backend fail2ban --fail2ban-sudo --jail agentwall-ml --state /var/lib/agentwall/model.pkl --log-level INFO
 Restart=always
 RestartSec=3
 

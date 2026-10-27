@@ -56,7 +56,6 @@ services:
     command:
       - "--log"
       - "/logs/agentwall_access.log"
-      - "--use-xff"
       - "--state"
       - "/state/model.pkl"
       - "--metrics-port"

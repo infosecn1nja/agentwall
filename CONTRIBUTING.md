@@ -41,7 +41,7 @@ and network access on first run (images + `river`/`redis` into a temp venv).
 ## Gates a PR must pass
 
 1. `bash tests/run-tests.sh` — Python unit/config tests + Lua assertions + shell syntax.
-2. `bash tests/e2e-real/run.sh` — real block/challenge/headless + agent-profile flow (63 assertions).
+2. `bash tests/e2e-real/run.sh` — real block/challenge/headless + agent-profile flow (64 assertions).
 3. `bash deploy/validate-linux.sh` — systemd/fail2ban/Apache/OpenResty checks (Docker).
 4. `promtool check rules deploy/prometheus/agentwall.rules.yml` if you touched metrics/rules.
 5. `bash -n` on any shell script you edited; `lua -e 'assert(loadfile(...))'` on Lua files.

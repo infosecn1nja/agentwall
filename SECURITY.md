@@ -42,6 +42,15 @@ ignored, secrets leak into logs) are in scope.
 
 ## Deploying safely
 
+- **Client IP source:** with `real_ip`/`mod_remoteip`, run the scorer **without**
+  `--use-xff`; it reads the corrected first log field. If you must parse XFF,
+  pass `--trust-proxies <CIDRs>` (right-to-left, trusted hops skipped). Never
+  trust the left-most XFF hop: it is attacker-controlled and can poison
+  allowlists or verdict keys.
+- **State directory:** the `--state` checkpoint is a pickle (code execution on
+  load). Keep its directory `0700` and owned by the scorer user; the scorer
+  writes 0600 and refuses symlinks, but cannot sandbox a writable directory.
+
 - Start in dry-run (`mark` headless mode), baseline, then enforce.
 - Keep `real_ip`/`mod_remoteip` trusted ranges correct; a wrong edge config can
   cause fail2ban to ban your CDN.

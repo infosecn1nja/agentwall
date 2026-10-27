@@ -416,12 +416,30 @@ end
 -- =============================================================================
 -- Used by the verify endpoint to compute {"next": ...}. Kept pure (no ngx) so
 -- it is unit-testable. Preserves the encoding of all other query parameters.
+-- Server-side validation for a same-origin redirect target. Reject absolute
+-- URLs, protocol-relative ("//evil"), backslash tricks ("/\\evil") and control
+-- characters. The client guard is not authoritative: `next` may later be used
+-- in a Location header.
+function M.safe_relative_path(uri)
+    if type(uri) ~= "string" or uri == "" then return "/" end
+    local path = uri:match("^([^?]*)") or ""
+    if path == "" or path:sub(1, 1) ~= "/" then return "/" end
+    if path:sub(1, 2) == "//" then return "/" end
+    if path:find("\\", 1, true) then return "/" end
+    for i = 1, #path do
+        local b = path:byte(i)
+        if b == 0 or b < 32 or b == 127 then return "/" end
+    end
+    return uri
+end
+
+
 function M.strip_pow_args(uri)
     if type(uri) ~= "string" or uri == "" then return "/" end
     uri = uri:gsub("#.*$", "")                 -- drop fragment
     local path, rest = uri:match("^([^?]*)(.*)$")
     if path == nil or path == "" then path = "/" end
-    if rest == nil or #rest < 2 then return path end
+    if rest == nil or #rest < 2 then return M.safe_relative_path(path) end
     local query = rest:sub(2)
     local kept = {}
     for part in query:gmatch("[^&]+") do
@@ -434,8 +452,8 @@ function M.strip_pow_args(uri)
             kept[#kept + 1] = part
         end
     end
-    if #kept == 0 then return path end
-    return path .. "?" .. table.concat(kept, "&")
+    if #kept == 0 then return M.safe_relative_path(path) end
+    return M.safe_relative_path(path .. "?" .. table.concat(kept, "&"))
 end
 
 -- =============================================================================

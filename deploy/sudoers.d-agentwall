@@ -26,6 +26,11 @@
 #
 # You do NOT need this file for --backend redis or --backend none.
 # =============================================================================
+# NOTE on the wildcard: sudo `*` also matches spaces, so a compromised scorer
+# could append extra arguments to this command. The scope is still one binary,
+# one jail and one action, and the worst case (ban arbitrary addresses in the
+# agentwall-ml jail) is exactly what the scorer is allowed to do. Use
+# --backend redis if you do not need packet-level bans.
 Cmnd_Alias AGENTWALL_ML_BAN = /usr/bin/fail2ban-client set agentwall-ml banip *
 
 agentwall ALL=(root) NOPASSWD: AGENTWALL_ML_BAN

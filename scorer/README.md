@@ -24,15 +24,20 @@ pip install -r requirements.txt
 Make nginx/Apache log the fields the scorer reads — use the `agentwall` log_format
 from `waf/nginx-agentwall.conf` (it appends `ua_flag=`, `probe=` and
 `xff="$http_x_forwarded_for"`). Standard combined format still parses, but the
-three extra features then stay 0 and `--use-xff` cannot recover the client IP
-(the scorer now logs an ERROR if it sees 1000 lines with no `xff=`).
+three extra features then stay 0.
+
+**Client IP:** run the scorer **without** `--use-xff` when nginx `real_ip` /
+Apache `mod_remoteip` is configured — the log's first field is already the real
+client, and the raw `xff=` tail is attacker-controlled. Only if real_ip is
+unavailable may you use `--use-xff`, and then you **must** pass
+`--trust-proxies <your proxy CIDRs>`: the scorer walks XFF right-to-left and
+skips trusted proxy hops (the left-most value is never trusted).
 
 ## 2. Baseline in dry-run (no blocking, the default)
 
 ```bash
 python3 agentwall_scorer.py \
     --log /var/log/nginx/agentwall_access.log \
-    --use-xff \
     --profile web \
     --metrics-port 9101 --metrics-bind 127.0.0.1 \
     --state /var/lib/agentwall/model.pkl
@@ -54,7 +59,7 @@ and it supports the verified challenge.
 # Redis (fail-open, self-expiring):
 REDIS_URL='redis://:PASSWORD@127.0.0.1:6379/0' \
 python3 agentwall_scorer.py --log /var/log/nginx/agentwall_access.log \
-    --use-xff --enforce --backend redis
+    --enforce --backend redis
 
 # fail2ban manual-ban jail (needs the sudoers entry + --fail2ban-sudo
 # because the scorer must not run as root):
@@ -105,7 +110,8 @@ commented in both files. Put secrets in `/etc/agentwall-scorer.env`
 | `--max-ips` / `--idle-evict` | LRU cap (200k) and idle eviction (600 s) |
 | `--state` | model checkpoint path (atomic write, corrupt state is ignored) |
 | `--metrics-port` / `--metrics-bind` | Prometheus `/metrics` + `/healthz` (0 = off) |
-| `--use-xff` | trust XFF as the client IP (only with nginx `real_ip` configured) |
+| `--use-xff` | resolve the client from XFF (right-most untrusted hop). **Requires** `--trust-proxies`; do **not** use it when real_ip/mod_remoteip already rewrites the first log field |
+| `--trust-proxies` | comma CIDRs of your own edge proxies for `--use-xff` (env `AGENTWALL_TRUSTED_PROXIES`); the left-most XFF hop is never trusted |
 | `--dns-timeout` | FCrDNS budget per lookup (0.8 s; spoofed-bot floods cannot stall the loop) |
 | `--allowlist` / `--allowlist-file` | CIDRs never scored or blocked |
 | `--fail2ban-sudo` / `--fail2ban-cmd` | run the ban through `sudo -n` / custom client path |
@@ -164,7 +170,13 @@ were fixed for production and are now configurable.
   a JS environment report + timing, so a stealth-patched browser (or a bot that
   posts the report itself) can spoof it. It reliably catches *default*
   Playwright/Puppeteer/headless Chromium; do not treat it as proof of humanity.
-- **XFF is only as trustworthy as your edge.** With `--use-xff` and no
-  `real_ip`, an attacker can spoof a victim/allowlisted IP; the scorer warns
-  when the log has no `xff=` field, but it cannot detect a lying edge.
+- **XFF is only as trustworthy as your edge.** Preferred setup: real_ip, scorer
+  without `--use-xff`. If you must parse XFF, `--trust-proxies` is mandatory and
+  parsing is right-to-left (skipping trusted hops); a client-supplied left-most
+  value is never used. A trusted proxy that does not append/strip XFF remains a
+  configuration risk outside the scorer's control.
+- **Pickle state = code execution.** The `--state` checkpoint is a pickle; if an
+  attacker can write to the state path, they can run code as the scorer. The
+  scorer writes 0600, warns on group/other-accessible directories, and refuses
+  symlinks, but the directory itself must be 0700 and owned by the service user.
 - This complements — never replaces — MFA, fast patching, server-side authz.

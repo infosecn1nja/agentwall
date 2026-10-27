@@ -51,8 +51,10 @@ pessimistic — read it before deploying or filing a bypass report.
 ## Trust boundaries
 
 1. **Edge trust:** `real_ip` accepts client IPs only from configured CDN/LB
-   ranges. If misconfigured, XFF spoofing can evade limits or cause bans of
-   innocent IPs/CDNs.
+   ranges. The scorer reads the corrected first log field and must not parse raw
+   XFF there; XFF-based scoring requires `--trust-proxies` and right-to-left
+   resolution. A left-most-XFF key mismatch would let an attacker rotate
+   spoofed keys (evasion) or target a victim IP.
 2. **Client truth:** the headless report is client-supplied. It is scored, not
    trusted. The server overwrites `report.ua` with the actual request UA.
 3. **Verdict store trust:** Redis is a control-plane component; private network,

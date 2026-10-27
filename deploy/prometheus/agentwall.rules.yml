@@ -116,7 +116,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: 'agentwall runs --use-xff but the access log has no xff= field'
+          summary: 'an XFF-based scorer run sees no xff= field'
           description: >-
             The scorer emitted its one-shot xff-missing warning: --use-xff is
             set but the first 1000 parsed lines carried no xff="..." tail, so

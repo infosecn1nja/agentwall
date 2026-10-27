@@ -48,6 +48,8 @@ class ComposeTests(unittest.TestCase):
         tokens = command if isinstance(command, list) else shlex.split(command)
         args = support.scale.build_argparser().parse_args(tokens)
         self.assertFalse(args.enforce, "compose must default to dry-run")
+        self.assertNotIn("--use-xff", tokens,
+                         "with real_ip, the scorer must read the log's first field")
         self.assertEqual(support.scale.validate_args(args), [])
 
     def test_redis_requires_a_password_and_is_not_public(self):
@@ -74,6 +76,18 @@ class SystemdTests(unittest.TestCase):
             active = line.split("ExecStart", 1)[1]
             self.assertNotIn("--enforce", active,
                              "the shipped unit must not enforce before the shadow phase")
+            self.assertNotIn("--use-xff", active,
+                             "with real_ip the scorer reads the log's first field")
+
+    def test_shipped_defaults_do_not_enable_xff_parsing(self):
+        dockerfile = read("deploy/Dockerfile")
+        self.assertNotIn("--use-xff", dockerfile)
+        compose = read("deploy/docker-compose.yml")
+        self.assertNotIn("--use-xff", compose)
+
+    def test_deprecated_v1_scorer_is_not_shipped_in_the_image(self):
+        dockerfile = read("deploy/Dockerfile")
+        self.assertNotIn("agentwall_scorer_v1.py", dockerfile)
 
     def test_unit_uses_env_file_for_secrets(self):
         self.assertIn("EnvironmentFile", self.text)
