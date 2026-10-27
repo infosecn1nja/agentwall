@@ -101,7 +101,7 @@ commented in both files. Put secrets in `/etc/agentwall-scorer.env`
 | `--warmup` | events learned before any action (800) |
 | `--hst-trees` / `--hst-height` / `--hst-window` | HalfSpaceTrees geometry (defaults 10 / 8 / 250 = river defaults). Cost and memory scale with `trees × 2^height`; the old 25/15 defaults were ~1.6M nodes, ~500 MB and <500 events/s. Changing them requires deleting `--state` (the scorer warns if the checkpoint geometry differs). |
 | `--once` | batch mode: read the whole log from the beginning to EOF and exit (baseline backfill / benchmarking; implies `--from-start`) |
-| `--p-block` / `--p-watch` | population percentiles for block/challenge (0.99/0.95) |
+| `--p-block` / `--p-watch` | population percentiles for block/challenge (0.99/0.95); only human-like, non-hard events update the population/model |
 | `--floor-block` / `--floor-watch` | absolute suspicion floors (0.55/0.40) |
 | `--human-floor` | never block a key at/above this human-ness (0.55) |
 | `--challenge-grace` | seconds after the first challenge before escalating to block (120) |
@@ -166,6 +166,9 @@ were fixed for production and are now configurable.
   streaming trade-off. Review weekly; delete `--state` to retrain from clean.
 - **False positives block real users.** Keep the allowlist current, run the
   shadow phase across a full weekly cycle, and prefer challenge over block.
+- **Learning poisoning is blocked by policy:** only human-like, non-hard events
+  update HST/P95/P99; attack traffic is scored but cannot normalise itself. This
+  is measured in `docs/EVALUATION.md` (removing the floor drops recall).
 - **Headless detection is advisory.** The `agentwall:headless:*` marker comes from
   a JS environment report + timing, so a stealth-patched browser (or a bot that
   posts the report itself) can spoof it. It reliably catches *default*

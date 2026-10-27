@@ -107,14 +107,18 @@ but is not proof of humanity.
 line → parse (combined + agentwall tails) → per-ip_key sliding window
      → features (rate, miss/deny/auth ratios, entropy, regularity,
                  persistence, probe, UA flag, multistage, human-ness inputs)
-     → river HalfSpaceTrees (HST) score (score-then-learn)
+     → river HalfSpaceTrees (HST) score; learn only human-like, non-hard events
      → humanness (web|api profile) → suspicion
-     → population quantiles P95/P99 with absolute floors
+     → population quantiles P95/P99 with absolute floors (benign-like events only)
      → decide(): hard signal | human floor | block/challenge/watch
      → action: Redis verdicts / fail2ban (debounced) / logs + metrics
 ```
 
-The anomaly model is `river.anomaly.HalfSpaceTrees` (Half-Space Trees,
+The online model is updated **only** from events with human-ness ≥
+`--human-floor` and no hard signal. Scoring still happens on every event, but
+attack traffic cannot teach the model that its own pattern is normal (online
+training poisoning), nor raise the population P99 used to challenge quieter
+families. The anomaly model is `river.anomaly.HalfSpaceTrees` (Half-Space Trees,
 `river~=0.21.0`). Default geometry is river's `n_trees=10, height=8,
 window_size=250` (O(trees·2^height)); the old 25/15 defaults were ~1.6M nodes. Options:
 `--hst-trees/--hst-height/--hst-window`. Changing geometry requires deleting

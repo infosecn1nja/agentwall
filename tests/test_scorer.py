@@ -203,6 +203,14 @@ class SuspicionTests(unittest.TestCase):
                 self.assertLessEqual(score, 1.0)
 
 
+class PopulationEligibilityTests(unittest.TestCase):
+    def test_only_human_like_non_hard_events_calibrate_population(self):
+        self.assertTrue(s.population_eligible(0.80, False, 0.55))
+        self.assertFalse(s.population_eligible(0.54, False, 0.55))
+        self.assertFalse(s.population_eligible(0.80, True, 0.55))
+        self.assertFalse(s.population_eligible(0.20, False, 0.55))
+
+
 class QuantileTests(unittest.TestCase):
     def test_quantiles_and_readiness(self):
         pop = s.PopulationQuantiles(window=100, recompute_every=1, qs=(0.5, 0.9))

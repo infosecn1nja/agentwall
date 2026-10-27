@@ -26,16 +26,26 @@ All notable changes to AgentWall are documented here. The format follows
   before any Redis lookup.
 - The deprecated v1 scorer is no longer copied into the container image (L-3);
   the sudoers wildcard trade-off is documented (L-4).
+- **Online training poisoning fixed:** HST and the population percentiles now
+  learn only from human-like, non-hard events. Previously every event was learned,
+  so repeated attack traffic (e.g. headless enumeration) became "normal" within
+  one session and stopped triggering the challenge; high-scoring attacks also
+  raised P99 above quieter families. Tracing showed anomaly dropping 0.92→0.35
+  and P99 rising to 0.648 while the headless suspicion was 0.59.
 
 ### Added
 
-- **Evaluation harness + honest results** (`benchmarks/`, `docs/EVALUATION.md`):
+- **Multi-seed evaluation harness** (`benchmarks/`, `docs/EVALUATION.md`):
   compares WAF-only, anomaly-only, challenge-only, the full pipeline, a naive
-  union and ablations on a labelled synthetic stream. The results are negative
-  for two common claims: no measured false-positive/latency advantage at equal
-  cost, and no super-additive combination. The document specifies formulas,
-  state, transition rules, metrics, threats to validity and the experiments
-  needed to make stronger claims.
+  union and ablations on a labelled synthetic stream, with separate
+  training/evaluation seeds. It reports false-block, benign-challenge,
+  challenge failure/completion, missed attacks, marginal-over-WAF and
+  equal-disruption comparisons. Headline: at 0% benign-challenge budget the full
+  stack reaches 40.5% recall vs 28.1% for WAF-only (0 false blocks), but costs
+  ~25× WAF CPU, is not faster, has no measured false-positive advantage, and
+  still misses distributed low-and-slow and spoofed-human headless agents. The
+  document specifies formulas, state, transition rules, traces, threats to
+  validity and the experiments needed to make production claims.
 - README now documents the detection model explicitly: `river`'s
   **HalfSpaceTrees** (Half-Space Trees) — why it is unsupervised/streaming, the
   score-then-learn pipeline, geometry flags (`--hst-trees/--hst-height/--hst-window`),

@@ -102,7 +102,7 @@ Verify before traffic:
 ```bash
 ./deploy/preflight.sh --use-xff --backend redis   # log format, secrets, config regressions
 ./deploy/validate-linux.sh                        # systemd/fail2ban/Apache/OpenResty in Docker
-./tests/run-tests.sh                              # 81 Python + 219 Lua assertions
+./tests/run-tests.sh                              # 82 Python + 219 Lua assertions
 ./tests/e2e-real/run.sh                           # real 403/challenge/headless/agent profiles (64 assertions)
 ```
 
@@ -181,10 +181,12 @@ Redis verdict writes
 Size for peak access-log line rate and shard by client-IP hash before raising
 model complexity. `--once` replays a log once (baseline backfill/benchmarks).
 
-**Controlled evaluation (including negative results):**
-[docs/EVALUATION.md](docs/EVALUATION.md) + [`benchmarks/`](benchmarks/). The
-current benchmark does **not** show a false-positive or latency advantage over a
-WAF, nor a super-additive combination; read it before making claims.
+**Controlled evaluation (multi-seed, with limitations):**
+[docs/EVALUATION.md](docs/EVALUATION.md) + [`benchmarks/`](benchmarks/). At a
+0% benign-challenge budget the full stack reaches 40.5% recall vs 28.1% for
+WAF-only with 0 false blocks; it is **not** faster or cheaper (~25x WAF CPU), has
+no measured false-positive advantage, and still misses distributed low-and-slow
+and spoofed-human headless agents. Read the limitations before quoting numbers.
 
 ---
 

@@ -44,7 +44,9 @@ SPEC = importlib.util.spec_from_file_location("agentwall_scorer", ROOT / "scorer
 A = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(A)
 
-RNG = random.Random(20261028)
+SEED = int(os.environ.get("BENCH_SEED", "20261028"))
+RNG = random.Random(SEED)              # evaluation stream
+BASE_RNG = random.Random(SEED + 1000)  # model training stream (held out from eval)
 WINDOW = 60.0
 MIN_EVENTS = 12
 BASE_TS = 1_800_000_000
@@ -57,12 +59,13 @@ ARTEX_UA = "norma/0.4"
 
 def event(ip, ts, path, status=200, ua=BROWSER_UA, is_auth=False,
           is_static=False, is_probe=False, ua_flag=False, is_browser=True,
-          is_tool=False, has_ref=True):
+          is_tool=False, has_ref=True, probe_raw=None):
     return {
         "ip": ip, "ts": ts, "status": status, "path": path,
         "is_auth": is_auth, "is_static": is_static, "is_probe": is_probe,
         "ua_flag": ua_flag, "is_browser": is_browser, "is_tool": is_tool,
         "has_ref": has_ref,
+        "probe_raw": probe_raw,
     }
 
 
@@ -73,7 +76,7 @@ def benign_baseline():
     out = []
     for k in range(300):
         ip = "10.10.{}.{}".format(k // 250, 1 + k % 250)
-        t = BASE_TS + RNG.uniform(0, 600)
+        t = BASE_TS + BASE_RNG.uniform(0, 600)
         for j in range(20):
             static = j % 3 == 0
             out.append(event(
@@ -128,6 +131,40 @@ def benign_power_users():
                 "/static/z.css" if static else "/orders/{}".format(j),
                 200, is_static=static, has_ref=not static,
             ))
+    return out
+
+
+def benign_api():
+    """Legitimate HTTP API clients: no JS, no browser markers, 10 requests."""
+    out = []
+    for k in range(100):
+        ip = "172.20.{}.{}".format(k // 200, 1 + k % 200)
+        t = BASE_TS + 1_380 + RNG.uniform(0, 60)
+        for j in range(10):
+            out.append(event(ip, t + j * RNG.uniform(2.0, 5.0),
+                             "/api/v1/items/{}".format(j), 200,
+                             "python-httpx/0.27.2", is_browser=False,
+                             is_tool=False, has_ref=False))
+    return out
+
+
+def agentic_encoded_probe():
+    """Encoded probes the raw WAF map cannot see; the scorer decodes them."""
+    out = []
+    for k in range(20):
+        ip = "198.18.4.{}".format(10 + k)
+        t = BASE_TS + 2_000 + RNG.uniform(0, 40)
+        for j in range(20):
+            if j < 10:
+                path, status, probe = "/x{}".format(j), 404, False
+            elif j < 16:
+                path, status, probe = "/s?q=%27%20OR%201%3D1", 404, True
+            else:
+                path, status, probe = "/login", 401, True
+            out.append(event(ip, t + j * RNG.uniform(1.5, 3.5), path, status,
+                             "custom-agent/1.0", is_auth=j >= 16, is_probe=probe,
+                             probe_raw=False, is_browser=False, is_tool=True,
+                             has_ref=False))
     return out
 
 
@@ -229,17 +266,21 @@ class WafOnly:
         q.append(ev)
         while q and q[0]["ts"] < now - 60:
             q.popleft()
-        if ev["is_probe"] or ev["ua_flag"]:
-            return True
-        if A.TOOL_UA_RE.search(ev.get("ua", "")) or A.GOODBOT_UA_RE.search(ev.get("ua", "")) is None and \
-                re.search(r"(nuclei|sqlmap|norma/|artex-|ffuf|nikto|dirsearch|wafw00f|katana|subfinder|naabu|gospider|interactsh|gobuster|feroxbuster|wpscan|masscan|zgrab)",
-                          ev.get("ua", ""), re.I):
-            return True
+        probe_visible = ev.get("probe_raw")
+        if probe_visible is None:
+            probe_visible = ev["is_probe"]
+        if probe_visible or ev["ua_flag"]:
+            return "block"
+        if A.TOOL_UA_RE.search(ev.get("ua", "")) or \
+                re.search(r"(nuclei|sqlmap|norma/|artex-|ffuf|nikto|dirsearch|wafw00f|katana|"
+                          r"subfinder|naabu|gospider|interactsh|gobuster|feroxbuster|wpscan|"
+                          r"masscan|zgrab)", ev.get("ua", ""), re.I):
+            return "block"
         recent = [e for e in q if e["ts"] >= now - 1]
         if len(recent) > 30:      # nginx ~15 r/s + burst 30
-            return True
+            return "block"
         if sum(1 for e in q if e["status"] in (400, 401, 403, 404, 429)) >= 20:
-            return True
+            return "block"
         return False
 
 
@@ -250,9 +291,6 @@ class AnomalyOnly:
         self.model = A.anomaly.HalfSpaceTrees(n_trees=10, height=8, window_size=250, seed=42)
         self.windows = {}
         self.learned = 0
-        self.train_model()
-
-    def train_model(self):
         for ev in BASELINE:
             w = self.windows.setdefault(ev["ip"], A.IPWindow())
             w.add(ev, WINDOW)
@@ -269,7 +307,7 @@ class AnomalyOnly:
         score = self.model.score_one(x)
         self.model.learn_one(x)
         self.learned += 1
-        return len(w.events) >= MIN_EVENTS and score >= 0.80
+        return "block" if len(w.events) >= MIN_EVENTS and score >= 0.80 else False
 
 
 class ChallengeOnly:
@@ -289,8 +327,8 @@ class ChallengeOnly:
         self.challenged.add(ip)
         p = self.profiles[ip]
         if not p["js"]:
-            return True                      # HTTP tool cannot solve JS
-        return p["report"] == "automation"   # headless default fails verification
+            return "challenge"               # HTTP tool cannot solve JS
+        return "block" if p["report"] == "automation" else False
 
 
 class AgentWallFull:
@@ -318,29 +356,39 @@ class AgentWallFull:
                 self.model.learn_one(x)
 
     def observe(self, ev):
-        if self.waf is not None and self.waf.observe(ev):
-            return True
+        if self.waf is not None:
+            res = self.waf.observe(ev)
+            if res:
+                return res
         ip = ev["ip"]
         w = self.windows.setdefault(ip, A.IPWindow())
         w.add(ev, WINDOW)
-        x, stats, hard = w.features()
+        x, stats, raw_hard = w.features()
         if x is None:
             return False
         anomaly = self.model.score_one(x)
-        self.model.learn_one(x)
         self.learned += 1
         human = A.humanness(stats, "web")
         suspicion = A.compute_suspicion(x, human, anomaly)
-        self.pop.update(suspicion)
+        # Percentile poisoning fix: only human-like, non-hard events calibrate
+        # the population. Attack events still get scored and can be challenged
+        # by the absolute floors / hard signals.
+        if A.population_eligible(human, raw_hard, self.human_floor):
+            self.model.learn_one(x)
+            self.pop.update(suspicion)
+        hard = bool(raw_hard) and self.use_hard
         if len(w.events) < MIN_EVENTS:
+            if os.environ.get("BENCH_TRACE_IP") == ip:
+                print("TRACE", ip, "n=", len(w.events), "human=%.2f" % human,
+                      "anom=%.2f" % anomaly, "susp=%.3f" % suspicion, "hard=", hard,
+                      "reason=min_events")
             return False
-        hard = bool(hard) and self.use_hard
         if ip in self.challenged:
             # A JS-capable client that passed the challenge is cleared for the
             # remainder of this synthetic session (mirrors agentwall:cleared).
             return False
         if hard:
-            return True
+            return "block"
         if human >= self.human_floor:
             return False
         if self.pop.ready():
@@ -349,14 +397,25 @@ class AgentWallFull:
         else:
             cut = 0.55
             watch_cut = 0.40
+        if os.environ.get("BENCH_TRACE_IP") == ip:
+            print("TRACE", ip, "n=", len(w.events), "human=%.2f" % human,
+                  "anom=%.2f" % anomaly, "susp=%.3f" % suspicion,
+                  "cut=%.3f" % (watch_cut if self.challenge_at_watch else cut),
+                  "hard=", hard, "pop=", len(self.pop.buf))
         if suspicion >= (watch_cut if self.challenge_at_watch else cut):
             self.challenged.add(ip)
             p = self.profiles[ip]
+            if os.environ.get("BENCH_TRACE_IP") == ip:
+                print("TRACE", ip, "action=challenge", "n=", len(w.events),
+                      "report=", p["report"], "susp=%.3f" % suspicion)
             if not p["js"]:
-                return True
+                return "challenge"           # HTTP tool fails the JS challenge
             if p["report"] == "automation":
-                return bool(self.headless)
-            self.challenge_friction.add(ip)   # passed challenge, not a detection
+                if self.headless:
+                    return "block"
+                self.challenge_friction.add(ip)  # no verification: treated as pass
+                return False
+            self.challenge_friction.add(ip)  # passed challenge, not a detection
             return False
         return False
 
@@ -367,14 +426,19 @@ class NaiveUnion:
     def __init__(self, parts):
         self.parts = parts
         self.done = set()
+        self.challenged = set()
 
     def observe(self, ev):
         ip = ev["ip"]
         if ip in self.done:
             return False
-        if any(p.observe(ev) for p in self.parts):
+        results = [p.observe(ev) for p in self.parts]
+        for p in self.parts:
+            if hasattr(p, "challenged") and ip in p.challenged:
+                self.challenged.add(ip)
+        if any(results):
             self.done.add(ip)
-            return True
+            return "block" if "block" in results else "challenge"
         return False
 
 
@@ -388,8 +452,11 @@ def build_stream():
         ("benign-browser", benign_browser("b"), False, True, None, "Browser users"),
         ("benign-flash", benign_flash_crowd(), False, True, None, "High-volume human flash crowd"),
         ("benign-power", benign_power_users(), False, True, None, "Legitimate power users (high rate, unique pages)"),
+        ("benign-api", benign_api(), False, False, None, "Legitimate non-JS API clients"),
         ("scanner-fast", scanner_fast(), True, False, None, "Nuclei-like HTTP scanner"),
         ("agentic-http", agentic_http(), True, False, None, "HTTP-only multi-stage agent (ARTEX-like)"),
+        ("agentic-encoded", agentic_encoded_probe(), True, False, None,
+         "Encoded probes: raw WAF sees nothing, scorer decodes"),
         ("agentic-stealth", agentic_stealth(), True, True, "human", "Slow browser-like agent, human report"),
         ("headless-enum", headless_enumeration("automation", 1), True, True, "automation", "Headless browser enumerating"),
         ("headless-stealth", headless_enumeration("human", 2), True, True, "human", "Headless browser with spoofed human report"),
@@ -414,28 +481,40 @@ def run_detector(detector, stream, profiles):
         seen_count[ev["ip"]] += 1
         if ev["ip"] in first_idx:
             continue
-        if detector.observe(ev):
-            actions[ev["ip"]] = True
+        res = detector.observe(ev)
+        if res:
+            actions[ev["ip"]] = res
             first_idx[ev["ip"]] = seen_count[ev["ip"]]
     elapsed = time.perf_counter() - start
+
     benign = [ip for ip, p in profiles.items() if not p["attack"]]
     attack = [ip for ip, p in profiles.items() if p["attack"]]
-    fp = [ip for ip in benign if ip in actions]
+    benign_blocked = [ip for ip in benign if actions.get(ip) == "block"]
+    challenged = set(getattr(detector, "challenged", set()))
+    benign_challenged = sorted(challenged & set(benign))
+    benign_failed = [ip for ip in benign_challenged if not profiles[ip]["js"]]
+    benign_passed = [ip for ip in benign_challenged if profiles[ip]["js"]]
     detected = [ip for ip in attack if ip in actions]
     latency = [first_idx[ip] for ip in detected]
+
     return {
         "actions": actions,
-        "fp": len(fp),
-        "benign": len(benign),
+        "benign_total": len(benign),
+        "attack_total": len(attack),
+        "benign_blocked": len(benign_blocked),
+        "benign_block_rate": len(benign_blocked) / max(1, len(benign)),
+        "benign_challenged": len(benign_challenged),
+        "benign_challenge_rate": len(benign_challenged) / max(1, len(benign)),
+        "benign_challenge_failed": len(benign_failed),
+        "benign_challenge_failure_rate": len(benign_failed) / max(1, len(benign)),
+        "benign_challenge_completion_rate": (
+            len(benign_passed) / len(benign_challenged) if benign_challenged else None),
         "detected": len(detected),
-        "attack": len(attack),
-        "fp_rate": len(fp) / max(1, len(benign)),
+        "missed": len(attack) - len(detected),
         "recall": len(detected) / max(1, len(attack)),
-        "median_latency": statistics.median(latency) if latency else None,
+        "median_latency_detected": statistics.median(latency) if latency else None,
         "seconds": elapsed,
         "ms_per_10k": elapsed * 1e7 / max(1, len(stream)),
-        "challenged_benign": len(detector.challenge_friction & set(benign))
-        if hasattr(detector, "challenge_friction") else 0,
     }
 
 
@@ -453,7 +532,7 @@ def per_scenario(detector_result, profiles, scenario):
 
 def main():
     stream, profiles, scenario = build_stream()
-    print("stream events:", len(stream), "| baseline:", len(BASELINE))
+    print("seed:", SEED, "| stream events:", len(stream), "| baseline:", len(BASELINE))
 
     waf = WafOnly()
     anomaly = AnomalyOnly()
@@ -461,7 +540,7 @@ def main():
     full = AgentWallFull(profiles)
     union = NaiveUnion([WafOnly(), AnomalyOnly(), ChallengeOnly(profiles)])
     ablations = {
-        "full-challenge-at-watch": AgentWallFull(profiles, challenge_at_watch=True),
+        "agentwall-full-challenge-at-watch": AgentWallFull(profiles, challenge_at_watch=True),
         "full-no-human-floor": AgentWallFull(profiles, human_floor=0.0),
         "full-no-hard-signals": AgentWallFull(profiles, use_hard=False),
         "full-no-headless": AgentWallFull(profiles, headless=False),
@@ -474,46 +553,68 @@ def main():
         ("anomaly-only", anomaly),
         ("challenge-only", challenge),
         ("agentwall-full", full),
-        ("agentwall-full-challenge-at-watch", ablations.pop("full-challenge-at-watch")),
         ("union-naive", union),
     ] + list(ablations.items())
     for label, det in entries:
         results[label] = run_detector(det, stream, profiles)
 
-    results["challenge-only"]["challenged_benign"] = sum(
-        1 for ip, p in profiles.items() if not p["attack"] and ip in challenge.challenged)
-    results["agentwall-full"]["challenged_benign"] = len(full.challenge_friction & {
-        ip for ip, p in profiles.items() if not p["attack"]})
-    # challenge-at-watch variant friction
-    cw = entries[4][1]
-    results["agentwall-full-challenge-at-watch"]["challenged_benign"] = len(
-        cw.challenge_friction & {ip for ip, p in profiles.items() if not p["attack"]})
+    # Marginal contribution after WAF: attack keys this strategy catches that
+    # the WAF-only baseline does not.
+    waf_actions = set(results["waf-only"]["actions"])
+    for label, r in results.items():
+        r["marginal_over_waf"] = len(set(r["actions"]) - waf_actions)
 
-    # ---- console summary ----
-    print("\n{:<22} {:>7} {:>8} {:>9} {:>10} {:>10} {:>12}".format(
-        "detector", "FP", "FP%", "recall", "med.lat", "challenge", "ms/10k"))
-    union_friction = len({ip for ip, p in profiles.items() if not p["attack"]}
-                         & challenge.challenged)
-    results["union-naive"]["challenged_benign"] = union_friction
+    # Recall achievable at the same benign challenge budget.
+    budget_rows = []
+    for budget in (0.0, 0.01, 0.05, 0.10):
+        eligible = [(name, r) for name, r in results.items()
+                    if r["benign_challenge_rate"] <= budget + 1e-12]
+        best = max(eligible, key=lambda kv: kv[1]["recall"]) if eligible else None
+        budget_rows.append((budget, best[0] if best else "-",
+                            best[1]["recall"] if best else None))
+
+    print("\n{:<36} {:>9} {:>10} {:>9} {:>8} {:>6} {:>8} {:>8} {:>9}".format(
+        "strategy", "block-FP", "benign-ch", "ch-fail", "recall", "miss", "med.lat*",
+        "margWAF", "ms/10k"))
     for name, r in results.items():
-        print("{:<22} {:>7} {:>7.1f}% {:>8.1f}% {:>10} {:>10} {:>12.1f}".format(
-            name, r["fp"], r["fp_rate"] * 100, r["recall"] * 100,
-            "-" if r["median_latency"] is None else int(r["median_latency"]),
-            r["challenged_benign"], r["ms_per_10k"]))
+        print("{:<36} {:>9} {:>9.1f}% {:>8.1f}% {:>7.1f}% {:>6} {:>8} {:>8} {:>9.1f}".format(
+            name,
+            "{} ({:.1f}%)".format(r["benign_blocked"], r["benign_block_rate"] * 100),
+            r["benign_challenge_rate"] * 100,
+            r["benign_challenge_failure_rate"] * 100,
+            r["recall"] * 100,
+            r["missed"],
+            "-" if r["median_latency_detected"] is None else int(r["median_latency_detected"]),
+            r["marginal_over_waf"],
+            r["ms_per_10k"]))
 
-    print("\nDetection by scenario:")
-    for name in ("waf-only", "anomaly-only", "challenge-only",
-                 "agentwall-full", "agentwall-full-challenge-at-watch"):
-        print(" ", name, per_scenario(results[name], profiles, scenario))
+    print("\nRecall at equal benign-challenge budget:")
+    for budget, name, recall in budget_rows:
+        print("  <= {:.0f}%: {:<28} {:>6}".format(
+            budget * 100, name,
+            "-" if recall is None else "{:.1f}%".format(recall * 100)))
 
-    # ---- write report ----
+    print("\nDetection by attack family (detected/total):")
+    order = [s for s in sorted(set(scenario.values())) if not s.startswith("benign")]
+    header = "{:<36}".format("strategy") + "".join("{:>18}".format(s) for s in order)
+    print(header)
+    for name in ("waf-only", "anomaly-only", "challenge-only", "agentwall-full",
+                 "agentwall-full-challenge-at-watch"):
+        sc = per_scenario(results[name], profiles, scenario)
+        print("{:<36}".format(name) + "".join("{:>18}".format(sc.get(s, "0/0")) for s in order))
+
     outdir = ROOT / "benchmarks"
-    outdir.mkdir(exist_ok=True)
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "seed": SEED,
         "python": sys.version.split()[0],
         "events": len(stream),
         "baseline_events": len(BASELINE),
+        "benign_keys": results["waf-only"]["benign_total"],
+        "attack_keys": results["waf-only"]["attack_total"],
+        "recall_at_budget": [
+            {"benign_challenge_budget": b, "best_strategy": n,
+             "recall": None if r is None else r} for b, n, r in budget_rows],
         "results": {k: {kk: vv for kk, vv in v.items() if kk != "actions"}
                     for k, v in results.items()},
         "per_scenario": {k: per_scenario(v, profiles, scenario) for k, v in results.items()},
@@ -522,27 +623,34 @@ def main():
 
     md = ["# AgentWall benchmark results", "",
           "Generated: {}".format(payload["generated_at"]),
-          "Events: {} (baseline {}), Python {}, synthetic ground truth.".format(
-              len(stream), len(BASELINE), payload["python"]), "",
-          "| detector | FP keys | FP rate | recall | median events-to-action | benign keys challenged | ms / 10k events |",
-          "|---|---:|---:|---:|---:|---:|---:|"]
-    union_friction = len({ip for ip, p in profiles.items() if not p["attack"]}
-                         & challenge.challenged)
-    results["union-naive"]["challenged_benign"] = union_friction
+          "Seed: {} — events: {} (baseline {}), Python {}, synthetic ground truth.".format(
+              SEED, len(stream), len(BASELINE), payload["python"]), "",
+          "Benign keys: {}, attack keys: {}. `med.lat*` is computed only over detected attacks.".format(
+              payload["benign_keys"], payload["attack_keys"]), "",
+          "| strategy | benign blocked (false block) | benign challenged | challenge failure | challenge completion | recall | missed | median events-to-action* | marginal over WAF | ms / 10k |",
+          "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
     for name, r in results.items():
-        md.append("| {} | {} | {:.1f}% | {:.1f}% | {} | {} | {:.1f} |".format(
-            name, r["fp"], r["fp_rate"] * 100, r["recall"] * 100,
-            "-" if r["median_latency"] is None else int(r["median_latency"]),
-            r["challenged_benign"], r["ms_per_10k"]))
-    md += ["", "## Detections by scenario", "",
-           "| detector | " + " | ".join(sorted({s for s in scenario.values() if s.startswith("b") is False})) + " |",
-           "|---|" + "---|" * len({s for s in scenario.values() if s.startswith("b") is False})]
-    attack_scenarios = sorted({s for s in scenario.values() if not s.startswith("benign")})
-    for name in ("waf-only", "anomaly-only", "challenge-only",
-                 "agentwall-full", "agentwall-full-challenge-at-watch"):
-        cells = [per_scenario(results[name], profiles, scenario).get(s, "0/0")
-                 for s in attack_scenarios]
-        md.append("| {} | {} |".format(name, " | ".join(cells)))
+        completion = ("-" if r["benign_challenge_completion_rate"] is None
+                      else "{:.1f}%".format(r["benign_challenge_completion_rate"] * 100))
+        md.append("| {} | {} ({:.1f}%) | {:.1f}% | {:.1f}% | {} | {:.1f}% | {} | {} | {} | {:.1f} |".format(
+            name, r["benign_blocked"], r["benign_block_rate"] * 100,
+            r["benign_challenge_rate"] * 100,
+            r["benign_challenge_failure_rate"] * 100, completion,
+            r["recall"] * 100, r["missed"],
+            "-" if r["median_latency_detected"] is None else int(r["median_latency_detected"]),
+            r["marginal_over_waf"], r["ms_per_10k"]))
+    md += ["", "## Recall at equal benign-challenge budget", "",
+           "| benign challenge budget | best strategy | recall |", "|---|---|---:|"]
+    for budget, name, recall in budget_rows:
+        md.append("| <= {:.0f}% | {} | {} |".format(
+            budget * 100, name, "-" if recall is None else "{:.1f}%".format(recall * 100)))
+    md += ["", "## Detections by attack family", "",
+           "| strategy | " + " | ".join(order) + " |",
+           "|---|" + "---|" * len(order)]
+    for name in ("waf-only", "anomaly-only", "challenge-only", "agentwall-full",
+                 "agentwall-full-challenge-at-watch"):
+        sc = per_scenario(results[name], profiles, scenario)
+        md.append("| {} | {} |".format(name, " | ".join(sc.get(s, "0/0") for s in order)))
     (outdir / "RESULTS.md").write_text("\n".join(md) + "\n")
     print("\nwrote", outdir / "RESULTS.md", "and", outdir / "results.json")
 

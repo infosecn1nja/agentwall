@@ -814,6 +814,17 @@ def decide(window, *, suspicion, humanness_score, hard, now, cooldown, grace,
     return None
 
 
+def population_eligible(humanness_score, hard, human_floor):
+    """Only human-like, non-hard events may shape the population percentile.
+
+    This is the fix for percentile poisoning: a burst of high-scoring attack
+    events must not raise the P99 used to challenge quieter families. Human-like
+    traffic (including a flash crowd) still calibrates the population; explicit
+    automation/hard signals are excluded.
+    """
+    return (not hard) and humanness_score >= human_floor
+
+
 def compute_suspicion(x, humanness_score, anomaly_score):
     base = anomaly_score * (1.0 - humanness_score)
     boost = (0.30 * x["persistence"] + 0.30 * x["probe_ratio"]
@@ -1111,13 +1122,19 @@ def main(argv=None):
                 continue
 
             anomaly_score = model.score_one(x)
-            model.learn_one(x)
             learned += 1
             metrics.inc("agentwall_learned_total")
 
             human = humanness(stats, args.profile)
             suspicion = compute_suspicion(x, human, anomaly_score)
-            pop.update(suspicion)
+            # Attack events must not poison the model or the population
+            # percentile. Only human-like, non-hard keys update the HST and
+            # P95/P99; the rest are still scored and can be blocked by hard
+            # signals/absolute floors. Without this, an attacker can teach the
+            # online model that its own traffic is normal (training poisoning).
+            if population_eligible(human, hard, args.human_floor):
+                model.learn_one(x)
+                pop.update(suspicion)
             metrics.set("agentwall_tracked_ips", len(windows))
             metrics.set("agentwall_pop_size", len(pop.buf))
             if learned >= args.warmup and not metrics.value("agentwall_warmup_done"):
