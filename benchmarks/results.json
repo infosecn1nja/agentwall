@@ -6,7 +6,7 @@
   ],
   "per_seed": [
     {
-      "generated_at": "2026-10-27T23:08:52.962073+00:00",
+      "generated_at": "2026-10-27T23:17:40.053815+00:00",
       "seed": 20261028,
       "python": "3.9.6",
       "events": 42795,
@@ -50,8 +50,8 @@
           "missed": 151,
           "recall": 0.28095238095238095,
           "median_latency_detected": 13,
-          "seconds": 0.15875274999999966,
-          "ms_per_10k": 37.09609767496195,
+          "seconds": 0.16579795799999975,
+          "ms_per_10k": 38.74236663161579,
           "marginal_over_waf": 0
         },
         "anomaly-only": {
@@ -68,8 +68,8 @@
           "missed": 166,
           "recall": 0.20952380952380953,
           "median_latency_detected": 25.0,
-          "seconds": 3.9594186250000005,
-          "ms_per_10k": 925.2058943801848,
+          "seconds": 3.996565167,
+          "ms_per_10k": 933.8860070101648,
           "marginal_over_waf": 12
         },
         "challenge-only": {
@@ -86,8 +86,8 @@
           "missed": 45,
           "recall": 0.7857142857142857,
           "median_latency_detected": 1,
-          "seconds": 0.010060208999998821,
-          "ms_per_10k": 2.3507907465822693,
+          "seconds": 0.010051209000000227,
+          "ms_per_10k": 2.3486876971609365,
           "marginal_over_waf": 206
         },
         "agentwall-full": {
@@ -104,8 +104,8 @@
           "missed": 125,
           "recall": 0.40476190476190477,
           "median_latency_detected": 12,
-          "seconds": 4.001569290999999,
-          "ms_per_10k": 935.0553314639558,
+          "seconds": 4.060151874999999,
+          "ms_per_10k": 948.7444502862483,
           "marginal_over_waf": 26
         },
         "union-naive": {
@@ -122,8 +122,8 @@
           "missed": 37,
           "recall": 0.8238095238095238,
           "median_latency_detected": 1,
-          "seconds": 4.038663292000001,
-          "ms_per_10k": 943.7231667250849,
+          "seconds": 4.222452375000001,
+          "ms_per_10k": 986.6695583596218,
           "marginal_over_waf": 214
         },
         "agentwall-full-challenge-at-watch": {
@@ -140,8 +140,8 @@
           "missed": 125,
           "recall": 0.40476190476190477,
           "median_latency_detected": 12,
-          "seconds": 4.263042958,
-          "ms_per_10k": 996.1544474821825,
+          "seconds": 3.928641917,
+          "ms_per_10k": 918.0142346068467,
           "marginal_over_waf": 26
         },
         "full-no-human-floor": {
@@ -158,8 +158,8 @@
           "missed": 145,
           "recall": 0.30952380952380953,
           "median_latency_detected": 13,
-          "seconds": 4.258481792000001,
-          "ms_per_10k": 995.0886299801383,
+          "seconds": 4.162447083,
+          "ms_per_10k": 972.6479922888187,
           "marginal_over_waf": 6
         },
         "full-no-hard-signals": {
@@ -176,8 +176,8 @@
           "missed": 125,
           "recall": 0.40476190476190477,
           "median_latency_detected": 12,
-          "seconds": 3.921890000000001,
-          "ms_per_10k": 916.436499591074,
+          "seconds": 4.183998250000002,
+          "ms_per_10k": 977.683899988317,
           "marginal_over_waf": 26
         },
         "full-no-headless": {
@@ -194,8 +194,8 @@
           "missed": 145,
           "recall": 0.30952380952380953,
           "median_latency_detected": 12,
-          "seconds": 4.2217392080000025,
-          "ms_per_10k": 986.5029110877446,
+          "seconds": 4.027221209,
+          "ms_per_10k": 941.0494704988902,
           "marginal_over_waf": 6
         },
         "full-no-waf": {
@@ -212,8 +212,8 @@
           "missed": 125,
           "recall": 0.40476190476190477,
           "median_latency_detected": 12,
-          "seconds": 3.879566541999999,
-          "ms_per_10k": 906.5466858277834,
+          "seconds": 3.829766250000006,
+          "ms_per_10k": 894.9097441289885,
           "marginal_over_waf": 26
         }
       },
@@ -311,7 +311,7 @@
       }
     },
     {
-      "generated_at": "2026-10-27T23:10:05.542086+00:00",
+      "generated_at": "2026-10-27T23:18:53.553517+00:00",
       "seed": 42,
       "python": "3.9.6",
       "events": 42795,
@@ -355,8 +355,8 @@
           "missed": 152,
           "recall": 0.2761904761904762,
           "median_latency_detected": 12.0,
-          "seconds": 0.1753940410000001,
-          "ms_per_10k": 40.98470405421197,
+          "seconds": 0.16044066700000048,
+          "ms_per_10k": 37.49051688281352,
           "marginal_over_waf": 0
         },
         "anomaly-only": {
@@ -373,8 +373,8 @@
           "missed": 160,
           "recall": 0.23809523809523808,
           "median_latency_detected": 23.5,
-          "seconds": 4.7298909590000004,
-          "ms_per_10k": 1105.2438273162754,
+          "seconds": 4.010522249999999,
+          "ms_per_10k": 937.1473887136345,
           "marginal_over_waf": 12
         },
         "challenge-only": {
@@ -391,8 +391,8 @@
           "missed": 45,
           "recall": 0.7857142857142857,
           "median_latency_detected": 1,
-          "seconds": 0.008597999999999217,
-          "ms_per_10k": 2.00911321416035,
+          "seconds": 0.010000791999999592,
+          "ms_per_10k": 2.336906647972799,
           "marginal_over_waf": 207
         },
         "agentwall-full": {
@@ -409,8 +409,8 @@
           "missed": 125,
           "recall": 0.40476190476190477,
           "median_latency_detected": 12,
-          "seconds": 4.0189822500000005,
-          "ms_per_10k": 939.1242551699967,
+          "seconds": 4.070523458999999,
+          "ms_per_10k": 951.1680007010162,
           "marginal_over_waf": 27
         },
         "union-naive": {
@@ -427,8 +427,8 @@
           "missed": 39,
           "recall": 0.8142857142857143,
           "median_latency_detected": 1,
-          "seconds": 3.925908667,
-          "ms_per_10k": 917.375550181096,
+          "seconds": 3.9302404999999982,
+          "ms_per_10k": 918.3877789461383,
           "marginal_over_waf": 213
         },
         "agentwall-full-challenge-at-watch": {
@@ -445,8 +445,8 @@
           "missed": 125,
           "recall": 0.40476190476190477,
           "median_latency_detected": 12,
-          "seconds": 4.2387884589999985,
-          "ms_per_10k": 990.4868463605557,
+          "seconds": 4.267050083000001,
+          "ms_per_10k": 997.0908010281577,
           "marginal_over_waf": 27
         },
         "full-no-human-floor": {
@@ -463,8 +463,8 @@
           "missed": 145,
           "recall": 0.30952380952380953,
           "median_latency_detected": 12,
-          "seconds": 5.105121499999999,
-          "ms_per_10k": 1192.924757565136,
+          "seconds": 4.131511374999999,
+          "ms_per_10k": 965.4191786423644,
           "marginal_over_waf": 7
         },
         "full-no-hard-signals": {
@@ -481,8 +481,8 @@
           "missed": 125,
           "recall": 0.40476190476190477,
           "median_latency_detected": 12,
-          "seconds": 4.096719,
-          "ms_per_10k": 957.2891692954785,
+          "seconds": 3.9774511250000018,
+          "ms_per_10k": 929.4195875686415,
           "marginal_over_waf": 27
         },
         "full-no-headless": {
@@ -499,8 +499,8 @@
           "missed": 145,
           "recall": 0.30952380952380953,
           "median_latency_detected": 12,
-          "seconds": 3.782539666999998,
-          "ms_per_10k": 883.8742065661871,
+          "seconds": 4.242244915999997,
+          "ms_per_10k": 991.2945241266497,
           "marginal_over_waf": 7
         },
         "full-no-waf": {
@@ -517,8 +517,8 @@
           "missed": 125,
           "recall": 0.40476190476190477,
           "median_latency_detected": 12,
-          "seconds": 3.7269590410000006,
-          "ms_per_10k": 870.8865617478679,
+          "seconds": 3.9062619579999946,
+          "ms_per_10k": 912.7846612922058,
           "marginal_over_waf": 27
         }
       },
@@ -616,7 +616,7 @@
       }
     },
     {
-      "generated_at": "2026-10-27T23:09:27.760712+00:00",
+      "generated_at": "2026-10-27T23:18:16.529253+00:00",
       "seed": 7,
       "python": "3.9.6",
       "events": 42795,
@@ -660,8 +660,8 @@
           "missed": 150,
           "recall": 0.2857142857142857,
           "median_latency_detected": 11.5,
-          "seconds": 0.1541020839999998,
-          "ms_per_10k": 36.009366514779714,
+          "seconds": 0.1564239999999999,
+          "ms_per_10k": 36.55193363710712,
           "marginal_over_waf": 0
         },
         "anomaly-only": {
@@ -678,8 +678,8 @@
           "missed": 160,
           "recall": 0.23809523809523808,
           "median_latency_detected": 23.0,
-          "seconds": 4.042381833,
-          "ms_per_10k": 944.5920862250264,
+          "seconds": 4.335775167000001,
+          "ms_per_10k": 1013.1499397125837,
           "marginal_over_waf": 10
         },
         "challenge-only": {
@@ -696,8 +696,8 @@
           "missed": 45,
           "recall": 0.7857142857142857,
           "median_latency_detected": 1,
-          "seconds": 0.01041083399999998,
-          "ms_per_10k": 2.432722046968099,
+          "seconds": 0.010891167000000479,
+          "ms_per_10k": 2.544962495618759,
           "marginal_over_waf": 205
         },
         "agentwall-full": {
@@ -714,8 +714,8 @@
           "missed": 125,
           "recall": 0.40476190476190477,
           "median_latency_detected": 12,
-          "seconds": 4.043554416999999,
-          "ms_per_10k": 944.8660864586983,
+          "seconds": 4.005415541,
+          "ms_per_10k": 935.9540930015188,
           "marginal_over_waf": 25
         },
         "union-naive": {
@@ -732,8 +732,8 @@
           "missed": 38,
           "recall": 0.819047619047619,
           "median_latency_detected": 1.0,
-          "seconds": 3.7503462919999997,
-          "ms_per_10k": 876.3515111578454,
+          "seconds": 3.7860669159999993,
+          "ms_per_10k": 884.6984264516882,
           "marginal_over_waf": 212
         },
         "agentwall-full-challenge-at-watch": {
@@ -750,8 +750,8 @@
           "missed": 125,
           "recall": 0.40476190476190477,
           "median_latency_detected": 12,
-          "seconds": 3.635933583,
-          "ms_per_10k": 849.6164465474939,
+          "seconds": 4.018701125,
+          "ms_per_10k": 939.0585640845893,
           "marginal_over_waf": 25
         },
         "full-no-human-floor": {
@@ -768,8 +768,8 @@
           "missed": 145,
           "recall": 0.30952380952380953,
           "median_latency_detected": 12,
-          "seconds": 3.923801832999999,
-          "ms_per_10k": 916.8832417338472,
+          "seconds": 4.3294119590000015,
+          "ms_per_10k": 1011.6630351676602,
           "marginal_over_waf": 5
         },
         "full-no-hard-signals": {
@@ -786,8 +786,8 @@
           "missed": 125,
           "recall": 0.40476190476190477,
           "median_latency_detected": 12,
-          "seconds": 3.9535679580000007,
-          "ms_per_10k": 923.8387563967755,
+          "seconds": 4.214495499999998,
+          "ms_per_10k": 984.8102582077343,
           "marginal_over_waf": 25
         },
         "full-no-headless": {
@@ -804,8 +804,8 @@
           "missed": 145,
           "recall": 0.30952380952380953,
           "median_latency_detected": 12,
-          "seconds": 3.677388167,
-          "ms_per_10k": 859.3032286482066,
+          "seconds": 3.8958935000000032,
+          "ms_per_10k": 910.3618413366055,
           "marginal_over_waf": 5
         },
         "full-no-waf": {
@@ -822,8 +822,8 @@
           "missed": 125,
           "recall": 0.40476190476190477,
           "median_latency_detected": 12,
-          "seconds": 3.593779125000001,
-          "ms_per_10k": 839.7661233788996,
+          "seconds": 3.8317409579999975,
+          "ms_per_10k": 895.371178408692,
           "marginal_over_waf": 25
         }
       },

@@ -169,6 +169,11 @@ were fixed for production and are now configurable.
 - **Learning poisoning is blocked by policy:** only human-like, non-hard events
   update HST/P95/P99; attack traffic is scored but cannot normalise itself. This
   is measured in `docs/EVALUATION.md` (removing the floor drops recall).
+  **Upgrade note:** checkpoints written before this policy may have learned
+  attack traffic. Delete `--state` once after upgrading and let warmup rebuild.
+- The population buffer is calibrated by human-like traffic; in an API-only
+  deployment use `--profile api` and verify with a shadow run that the buffer
+  fills, otherwise the absolute floors apply.
 - **Headless detection is advisory.** The `agentwall:headless:*` marker comes from
   a JS environment report + timing, so a stealth-patched browser (or a bot that
   posts the report itself) can spoof it. It reliably catches *default*

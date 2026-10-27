@@ -156,6 +156,10 @@ Secrets belong in the environment, never in unit files or the repo:
 - [ ] CI green (unit + preflight + linux-config + e2e-real).
 - [ ] Optional but recommended: `bash tests/e2e-real/run.sh` (Docker; real
       403/challenge/headless + agent profiles against real Redis + OpenResty + the real scorer) → 64/64 PASS.
+- [ ] **Upgrading?** Delete the old `/var/lib/agentwall/model.pkl` before
+      starting this build: the learning policy changed (only human-like,
+      non-hard events update HST/P99), and an old checkpoint may already have
+      learned attack traffic. Cold start + warmup is expected.
 - [ ] Run the scorer with `--enforce` **off** for at least a full weekly cycle,
       including a traffic peak.
 

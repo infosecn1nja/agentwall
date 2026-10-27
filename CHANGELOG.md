@@ -31,7 +31,9 @@ All notable changes to AgentWall are documented here. The format follows
   so repeated attack traffic (e.g. headless enumeration) became "normal" within
   one session and stopped triggering the challenge; high-scoring attacks also
   raised P99 above quieter families. Tracing showed anomaly dropping 0.92→0.35
-  and P99 rising to 0.648 while the headless suspicion was 0.59.
+  and P99 rising to 0.648 while the headless suspicion was 0.59. Old
+  checkpoints may already contain attack-trained state: delete `--state` once
+  after upgrading (cold start + warmup).
 
 ### Added
 
