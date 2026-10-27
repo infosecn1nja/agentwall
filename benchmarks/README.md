@@ -75,6 +75,23 @@ keys and failing **10.3%** of them (non-JS API clients). Full costs ~25× WAF CP
 is not faster, and still misses distributed low-and-slow and spoofed-human
 headless agents.
 
+## Benign false-positive stress gate
+
+`fp_stress.py` runs seven benign families that look suspicious to cheap
+heuristics (direct navigation without referer, stale 404 links, privacy browser,
+slow mobile, long non-JS API clients, health checks, shared corporate/NAT IP)
+through the full stack with production defaults. It **fails the run** on any
+false block or benign challenge failure.
+
+```bash
+python benchmarks/fp_stress.py
+# or: BENCH_SEEDS=20261028,7,42 python benchmarks/fp_stress.py
+```
+
+Current result: **2,610 benign key-seeds across 3 seeds, 0 false blocks, 0 benign
+challenges, 0 challenge failures** (synthetic guardrail, not a production FP
+measurement; production requires shadow-traffic review).
+
 ## Honest limitations
 
 Synthetic traffic, simplified WAF, modelled challenge outcomes, no real

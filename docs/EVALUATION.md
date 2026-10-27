@@ -15,8 +15,11 @@ multi-seed benchmark:
   traffic is normal.
 - **Effect:** full-stack recall rises from **28.1% (WAF-only) to 40.5%** with
   **0 benign blocks, 0 benign challenges**, and **+26 attack keys found after
-  WAF**. But it costs ~**25×** the WAF-only CPU and is **not faster**; no
-  false-positive advantage was observed (both 0 in this set).
+  WAF**. A separate benign stress gate (7 adversarial-benign families, **2,610
+  benign key-seeds**) also measured **0 false blocks, 0 benign challenges, 0
+  challenge failures** at production defaults. But it costs ~**25×** the WAF-only
+  CPU and is **not faster**; both WAF and full measured 0 FPs, so this is a
+  safety result, not evidence of better FP reduction.
 - **Combination:** at an **equal benign-challenge budget (0%)**, full is the best
   strategy (40.5% vs 28.1%). Challenge-only/union have higher raw recall
   (78.6%/81.9%) but challenge **100%** of benign keys and make **10.3%** of
@@ -203,7 +206,30 @@ shows the denominator problem. Detections by family:
 | **agentwall-full** | **20/20** | **25/25** | **0/25** | **0/80** | **20/20** | **0/20** | **20/20** |
 | union-naive | 20/20 | 25/25 | 7/25 | 80/80 | 20/20 | 0/20 | 20/20 |
 
-### 2.2 Equal-disruption comparison
+### 2.2 Benign false-positive stress gate
+
+`benchmarks/fp_stress.py` runs 870 benign keys per seed across seven families
+designed to trip cheap heuristics: direct navigation with no referer, stale 404
+links, privacy browsers (referer stripped), slow mobile, long non-JS API clients,
+health checks, and a high-volume shared corporate/NAT IP. Production defaults,
+three seeds (2,610 benign key-seeds total):
+
+| Family | Keys/seed | False blocks | Benign challenges | Challenge failures |
+|---|---:|---:|---:|---:|
+| direct navigation | 150 | 0 | 0 | 0 |
+| broken 404 links | 150 | 0 | 0 | 0 |
+| privacy browser | 150 | 0 | 0 | 0 |
+| slow mobile | 150 | 0 | 0 | 0 |
+| long API client | 150 | 0 | 0 | 0 |
+| health check | 100 | 0 | 0 | 0 |
+| shared corporate IP | 20 | 0 | 0 | 0 |
+| **Total** | **870/seed** | **0** | **0** | **0** |
+
+This is a synthetic guardrail, not a production FP rate. It does show that the
+gating does not fire on these adversarial-benign shapes; production still needs a
+shadow week with real traffic and an allowlist for API/monitoring clients.
+
+### 2.3 Equal-disruption comparison
 
 Benign-challenge budget = benign challenged / **all 970** benign keys:
 
@@ -218,7 +244,7 @@ Challenge-only/union are not comparable at these budgets: they challenge 100% of
 benign keys and make 100/970 = **10.3%** of them fail (the non-JS API clients).
 That is why "raw recall" alone is misleading.
 
-### 2.3 Layer contributions (after WAF)
+### 2.4 Layer contributions (after WAF)
 
 - **Full vs WAF:** +26 attack keys (20 headless enumeration, 6 encoded probes
   missed by the raw WAF map) at +12.4 recall points, **0** benign challenge.
@@ -233,7 +259,7 @@ That is why "raw recall" alone is misleading.
   provides immediate signature handling; the benchmark does not measure its
   defence-in-depth value. It is kept for cost/latency, not unique recall.
 
-### 2.4 Why the missed cases are missed (traced)
+### 2.5 Why the missed cases are missed (traced)
 
 Run `BENCH_TRACE_IP=<ip> python benchmarks/agentwall_bench.py` to reproduce.
 
@@ -254,7 +280,7 @@ Run `BENCH_TRACE_IP=<ip> python benchmarks/agentwall_bench.py` to reproduce.
 - **Headless with spoofed human report:** same as stealth — no observable signal
   distinguishes it after a successful challenge.
 
-### 2.5 Threats to validity
+### 2.6 Threats to validity
 
 This is **not production evidence**:
 
@@ -277,15 +303,17 @@ lab runs of real agents (default and stealth, with authorization), end-to-end
 challenge cost/completion, multiple independent traffic sources, confidence
 intervals, and ablations on real data.
 
-### 2.6 Answers
+### 2.7 Answers
 
 1. **Mechanism:** specific composite formula/state/transition design plus a
    concrete **benign-only learning policy**. The novelty is compositional and
    operational; no new anomaly algorithm is claimed.
-2. **False positives / faster detection at equal cost:** **no false-positive
-   advantage observed** (0 vs 0); **not faster** (median 12 vs 12); full costs
-   ~25× WAF-only CPU. The measured benefit is **+12.4 recall points at zero
-   benign challenge**, not FP or latency.
+2. **False positives / faster detection at equal cost:** **0 false blocks and 0
+   benign challenges** across 2,610 benign key-seeds in the stress gate (and
+   0/970 in the main benchmark); no *advantage* over WAF is claimed because both
+   measured 0. It is **not faster** (median 12 vs 12) and costs ~25× WAF-only
+   CPU. The measured benefit is **+12.4 recall points at zero benign
+   challenge**, not FP or latency.
 3. **Beyond the sum:** **yes at equal benign-challenge budget** — full 40.5% vs
    WAF 28.1% at 0% benign challenge; challenge-only/union exceed full raw recall
    but only by challenging everyone (100%) and failing 10.3% of benign clients.

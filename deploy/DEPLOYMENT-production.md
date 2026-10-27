@@ -154,6 +154,8 @@ Secrets belong in the environment, never in unit files or the repo:
 - [ ] Secrets generated with `deploy/gen-secrets.sh`, installed 0600, and not in
       the repo; logrotate installed.
 - [ ] CI green (unit + preflight + linux-config + e2e-real).
+- [ ] `python benchmarks/fp_stress.py` → gate PASS (0 false blocks / 0 benign
+      challenge failures on the adversarial-benign suite; synthetic).
 - [ ] Optional but recommended: `bash tests/e2e-real/run.sh` (Docker; real
       403/challenge/headless + agent profiles against real Redis + OpenResty + the real scorer) → 64/64 PASS.
 - [ ] **Upgrading?** Delete the old `/var/lib/agentwall/model.pkl` before

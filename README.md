@@ -186,7 +186,10 @@ model complexity. `--once` replays a log once (baseline backfill/benchmarks).
 0% benign-challenge budget the full stack reaches 40.5% recall vs 28.1% for
 WAF-only with 0 false blocks; it is **not** faster or cheaper (~25x WAF CPU), has
 no measured false-positive advantage, and still misses distributed low-and-slow
-and spoofed-human headless agents. Read the limitations before quoting numbers.
+and spoofed-human headless agents. A benign stress gate (7 adversarial-benign
+families, 2,610 key-seeds across 3 seeds) measured **0 false blocks / 0 benign
+challenges** with production defaults. Read the limitations before quoting
+numbers.
 
 ---
 

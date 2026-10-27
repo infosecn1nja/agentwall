@@ -1,0 +1,147 @@
+{
+  "seeds": [
+    20261028,
+    7,
+    42
+  ],
+  "per_seed": {
+    "20261028": {
+      "direct-navigation": {
+        "keys": 150,
+        "blocked": 0,
+        "challenged": 0,
+        "challenge_failed": 0
+      },
+      "broken-links-404": {
+        "keys": 150,
+        "blocked": 0,
+        "challenged": 0,
+        "challenge_failed": 0
+      },
+      "privacy-browser": {
+        "keys": 150,
+        "blocked": 0,
+        "challenged": 0,
+        "challenge_failed": 0
+      },
+      "slow-mobile": {
+        "keys": 150,
+        "blocked": 0,
+        "challenged": 0,
+        "challenge_failed": 0
+      },
+      "long-api-client": {
+        "keys": 150,
+        "blocked": 0,
+        "challenged": 0,
+        "challenge_failed": 0
+      },
+      "health-check": {
+        "keys": 100,
+        "blocked": 0,
+        "challenged": 0,
+        "challenge_failed": 0
+      },
+      "shared-corporate-ip": {
+        "keys": 20,
+        "blocked": 0,
+        "challenged": 0,
+        "challenge_failed": 0
+      }
+    },
+    "7": {
+      "direct-navigation": {
+        "keys": 150,
+        "blocked": 0,
+        "challenged": 0,
+        "challenge_failed": 0
+      },
+      "broken-links-404": {
+        "keys": 150,
+        "blocked": 0,
+        "challenged": 0,
+        "challenge_failed": 0
+      },
+      "privacy-browser": {
+        "keys": 150,
+        "blocked": 0,
+        "challenged": 0,
+        "challenge_failed": 0
+      },
+      "slow-mobile": {
+        "keys": 150,
+        "blocked": 0,
+        "challenged": 0,
+        "challenge_failed": 0
+      },
+      "long-api-client": {
+        "keys": 150,
+        "blocked": 0,
+        "challenged": 0,
+        "challenge_failed": 0
+      },
+      "health-check": {
+        "keys": 100,
+        "blocked": 0,
+        "challenged": 0,
+        "challenge_failed": 0
+      },
+      "shared-corporate-ip": {
+        "keys": 20,
+        "blocked": 0,
+        "challenged": 0,
+        "challenge_failed": 0
+      }
+    },
+    "42": {
+      "direct-navigation": {
+        "keys": 150,
+        "blocked": 0,
+        "challenged": 0,
+        "challenge_failed": 0
+      },
+      "broken-links-404": {
+        "keys": 150,
+        "blocked": 0,
+        "challenged": 0,
+        "challenge_failed": 0
+      },
+      "privacy-browser": {
+        "keys": 150,
+        "blocked": 0,
+        "challenged": 0,
+        "challenge_failed": 0
+      },
+      "slow-mobile": {
+        "keys": 150,
+        "blocked": 0,
+        "challenged": 0,
+        "challenge_failed": 0
+      },
+      "long-api-client": {
+        "keys": 150,
+        "blocked": 0,
+        "challenged": 0,
+        "challenge_failed": 0
+      },
+      "health-check": {
+        "keys": 100,
+        "blocked": 0,
+        "challenged": 0,
+        "challenge_failed": 0
+      },
+      "shared-corporate-ip": {
+        "keys": 20,
+        "blocked": 0,
+        "challenged": 0,
+        "challenge_failed": 0
+      }
+    }
+  },
+  "totals": {
+    "benign_key_seeds": 2610,
+    "false_blocks": 0,
+    "benign_challenges": 0,
+    "challenge_failures": 0
+  }
+}

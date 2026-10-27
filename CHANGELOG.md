@@ -45,9 +45,12 @@ All notable changes to AgentWall are documented here. The format follows
   equal-disruption comparisons. Headline: at 0% benign-challenge budget the full
   stack reaches 40.5% recall vs 28.1% for WAF-only (0 false blocks), but costs
   ~25× WAF CPU, is not faster, has no measured false-positive advantage, and
-  still misses distributed low-and-slow and spoofed-human headless agents. The
-  document specifies formulas, state, transition rules, traces, threats to
-  validity and the experiments needed to make production claims.
+  still misses distributed low-and-slow and spoofed-human headless agents. A
+  benign false-positive guardrail (`benchmarks/fp_stress.py`) adds seven
+  adversarial-benign families: 2,610 benign key-seeds across 3 seeds measured
+  0 false blocks, 0 benign challenges, 0 challenge failures at production
+  defaults. The document specifies formulas, state, transition rules, traces,
+  threats to validity and the experiments needed to make production claims.
 - README now documents the detection model explicitly: `river`'s
   **HalfSpaceTrees** (Half-Space Trees) — why it is unsupervised/streaming, the
   score-then-learn pipeline, geometry flags (`--hst-trees/--hst-height/--hst-window`),
