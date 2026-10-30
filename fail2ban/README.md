@@ -118,6 +118,7 @@ ignoreregex = .*
 logpath  = /var/log/nginx/agentwall_access.log
 
 [agentwall-behavior]
+# shipped as `enabled = false` (shadow phase); set true in the enforce phase
 enabled  = true
 filter   = agentwall-behavior
 logpath  = /var/log/nginx/agentwall_access.log
@@ -133,6 +134,7 @@ ignoreip = 127.0.0.1/8 ::1
 #banaction = nftables-multiport
 
 [agentwall-auth]
+# shipped as `enabled = false` (shadow phase); set true in the enforce phase
 enabled  = true
 filter   = agentwall-auth
 logpath  = /var/log/nginx/agentwall_access.log

@@ -11,13 +11,15 @@
 --     5. GET agentwall:challenge:<ip_key>          -> absent: allow
 --     6. mode=block and agentwall:headless present -> 403 (challenged requests only;
 --                                                 read before step 7 writes it)
---     7. automation User-Agent (every request) -> write marker + WARN (never a
---                                                 direct response; blocks via 6
---                                                 and via the verify score)
+--     7. automation User-Agent (every request) -> write marker + WARN; in
+--                                                 mode=block also 403 for every
+--                                                 request (not only challenged ones)
 --     8. valid clearance cookie                -> SET agentwall:cleared, DEL challenge,
 --                                                 allow
 --     9. GET fallback ?agentwall_id=&agentwall_pow=    -> id+PoW verify (no report, no
---                                                 headless signal), Set-Cookie, 302
+--                                                 headless signal), Set-Cookie, 302.
+--                                                 Disabled in mode=block unless
+--                                                 AGENTWALL_GET_FALLBACK=on.
 --    10. otherwise                             -> mint <id>, store
 --        "agentwall:chal:<id>" = "<ip_key>|<issued_ms>" EX 180, serve 429 interstitial
 --
@@ -42,6 +44,7 @@
 --   env AGENTWALL_CHAL_SECRET; env AGENTWALL_POW_DIFF; env AGENTWALL_CHAL_TTL;
 --   env AGENTWALL_CLR_TTL;     env AGENTWALL_HEADLESS_MODE; env AGENTWALL_HEADLESS_TTL;
 --   env AGENTWALL_HEADLESS_BLOCK; env AGENTWALL_HEADLESS_SUSPECT; env AGENTWALL_MIN_SOLVE_MS;
+--   env AGENTWALL_GET_FALLBACK;
 -- http context:
 --   lua_package_path "/etc/nginx/lua/?.lua;;";
 --   lua_shared_dict agentwall_cache 2m;
@@ -884,6 +887,15 @@ local chal_id = args["agentwall_id"]
 local nonce = args["agentwall_pow"]
 if type(chal_id) ~= "string" then chal_id = nil end
 if type(nonce) ~= "string" then nonce = nil end
+
+if chal_id and nonce and not cfg.get_fallback then
+    -- Report-less verification is disabled (mode=block default): the PoW alone
+    -- would let a non-browser client bypass the headless check. Serve a fresh
+    -- interstitial; real browsers verify via POST /__agentwall_verify.
+    log_limited("get-fallback-off", ngx.INFO,
+        "agentwall: GET fallback disabled (AGENTWALL_GET_FALLBACK); re-challenging ip_key=" .. ip_key)
+    return issue_challenge(red, ip_key, cfg.pow_diff)
+end
 
 if chal_id and nonce then
     -- Bound before touching Redis (the verify endpoint already does this).

@@ -257,12 +257,11 @@ Ordinary request flow in `agentwall_challenge_block.lua`:
 1. `agentwall:block:<ip_key>` present → **403** (hard block always wins).
 2. URI is `/__agentwall_verify` → JSON verify handler (§5.1); no interstitial.
 3. Automation User-Agent (server-side `$http_user_agent`, e.g.
-   `HeadlessChrome`, `Electron/`, Playwright/Puppeteer/Selenium markers) →
-   write `agentwall:headless`, WARN, and continue. This is never a direct response:
-   the first challenged request still gets the interstitial (so the browser can
-   reach `/__agentwall_verify`); in `AGENTWALL_HEADLESS_MODE=block` the marker then
-   denies *subsequent* challenged requests via step 5, and the verify score can
-   deny the current one (§8).
+   `HeadlessChrome`, Playwright/Puppeteer/Selenium and scanner markers) →
+   write `agentwall:headless`, WARN. In `mark` mode the request continues; in
+   `AGENTWALL_HEADLESS_MODE=block` the request is answered **403** immediately
+   (every request, challenged or not). `Electron/` is deliberately not a marker:
+   Slack, Teams, Discord, VS Code and many in-house desktop apps embed sites.
 4. `agentwall:challenge:<ip_key>` absent → allow.
 5. `AGENTWALL_HEADLESS_MODE=block` and `agentwall:headless:<ip_key>` present → **403**
    (a previously-detected automation client cannot re-enter the challenge).
@@ -272,7 +271,9 @@ Ordinary request flow in `agentwall_challenge_block.lua`:
    <clr_ttl>` then `DEL agentwall:challenge:<ip_key>` (in that order, so a failed
    cleared-write leaves the challenge in place and the next request retries),
    allow.
-7. **GET fallback** `?agentwall_id=...&agentwall_pow=...` (legacy/no-report path) →
+7. **GET fallback** `?agentwall_id=...&agentwall_pow=...` (legacy/no-report path;
+   only when `AGENTWALL_GET_FALLBACK` resolves to on — by default not in `block`
+   mode, where it re-serves the interstitial instead) →
    `GET agentwall:chal:<id>`, `DEL` it (single use), verify id binding + PoW; on
    success `SET agentwall:cleared`, `DEL agentwall:challenge`, `Set-Cookie`, **302** to
    the same URI without the two args. A missing report does **not** itself
@@ -406,6 +407,7 @@ seconds, so a persistent fault cannot flood the error log.
 | `AGENTWALL_HEADLESS_BLOCK` | `0.60` | headless score ≥ this = automation; clamped 0..1 |
 | `AGENTWALL_HEADLESS_SUSPECT` | `0.35` | score in [suspect, block) = log-only INFO, **no** marker, normal flow; clamped 0..1 |
 | `AGENTWALL_MIN_SOLVE_MS` | `250` | server-measured solve time under this adds `+0.30` to the score (one signal only) |
+| `AGENTWALL_GET_FALLBACK` | `auto` | report-less GET fallback (`?agentwall_id=&agentwall_pow=`): `auto` = on in `mark` mode, **off in `block` mode** (it verifies the PoW only, so it would let a non-browser client skip the headless check); `on` / `off` force it |
 
 ---
 
@@ -414,7 +416,7 @@ seconds, so a persistent fault cannot flood the error log.
 **What it is:** an advisory score in `[0,1]` computed in two places:
 
 1. **Every ordinary request, cheaply:** `is_automation_ua($http_user_agent)`
-   (case-insensitive: `HeadlessChrome`, `Electron/`, `PhantomJS`, `SlimerJS`,
+   (case-insensitive: `HeadlessChrome`, `PhantomJS`, `SlimerJS`,
    `playwright`, `puppeteer`, `selenium`, `webdriver`, `HtmlUnit`, `jsdom`,
    `Cypress`). On a match Lua writes `agentwall:headless:<ip_key> 1 EX
    AGENTWALL_HEADLESS_TTL` (debounced to ~1 write/60s) and logs WARN; behavior then
@@ -432,15 +434,25 @@ Weights (implemented in `agentwall_common.headless_score`, clamped to `[0,1]`):
 | CDP artifact (`cdp`) true | +0.50 |
 | UA contains `HeadlessChrome` | +0.60 |
 | UA matches another automation marker | +0.40 |
-| `plugins == 0 && mimeTypes == 0` and UA looks Chrome/Firefox | +0.20 |
-| `chrome == false` while UA contains `Chrome/` | +0.25 |
-| software WebGL (SwiftShader/llvmpipe/Mesa/ANGLE/Microsoft Basic Render/SwANGLE) | +0.20 |
+| `plugins == 0 && mimeTypes == 0` and UA looks Chrome/Firefox (**desktop UA only**) | +0.20 |
+| `chrome` not true while UA contains `Chrome/` (**desktop UA only**) | +0.25 |
+| software WebGL (SwiftShader/llvmpipe/softpipe/Microsoft Basic Render/SwANGLE) | +0.20 |
+| empty plugin/MIME surface **and** software WebGL (any UA) | +0.25 |
+| `pdfViewer == false` and `plugins == 0` (**desktop UA only**) | +0.15 |
 | `languages` missing/empty | +0.15 |
-| `outerW == 0` or `outerH == 0` or `outerW > screenW` | +0.20 |
+| `outerW == 0` or `outerH == 0` or (desktop UA) `outerW > screenW` | +0.20 |
 | `screenW == 0` | +0.15 |
 | `hardwareConcurrency` missing or ≤ 1 | +0.05 |
 | report not a table, or fewer than 5 expected keys present | +0.40 |
 | `solve_ms` missing or < `AGENTWALL_MIN_SOLVE_MS` | +0.30 |
+
+"Desktop UA only" rows are skipped for phones, tablets and Android WebView
+(`agentwall_common.is_mobile_ua`: `Android`, `iPhone`, `iPad`, `Mobile`, `; wv)`).
+Those browsers legitimately expose no plugins, no PDF viewer and (WebView: the
+Instagram/Facebook/TikTok/LINE in-app browsers) no `window.chrome`; scoring them
+put real in-app visitors exactly on the 0.60 block threshold. `ANGLE` and `Mesa`
+are **not** software rasterizers: real Chrome/Edge on Windows/macOS report
+`ANGLE (<GPU vendor>, <GPU>, ...)` and Linux Intel/AMD drivers report `Mesa ...`.
 
 Decision: score ≥ `AGENTWALL_HEADLESS_BLOCK` → automation (marker; 403 in `block`
 mode, allow in `mark` mode); `AGENTWALL_HEADLESS_SUSPECT` ≤ score < block → INFO log
@@ -465,7 +477,7 @@ challenged requests, and the verify endpoint itself returns
   outer window, empty `navigator.languages`, CDP globals (`__playwright*`,
   `__puppeteer*`, `cdc_*`), and/or implausibly fast PoW solves.
 * Other obvious automation launches that leak their UA (Selenium, HtmlUnit,
-  PhantomJS, Electron shell apps, jsdom/Cypress harnesses).
+  PhantomJS, jsdom/Cypress harnesses). Electron apps are not flagged by UA.
 
 ### What it does NOT detect (honest limits — arms race)
 

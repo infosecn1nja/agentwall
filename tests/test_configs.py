@@ -240,6 +240,102 @@ class ProductionAssetTests(unittest.TestCase):
         self.assertIn("postrotate", text)
 
 
+class ProductionSafetyDefaultsTests(unittest.TestCase):
+    """Regression locks for the production-hardening fixes: nothing may block
+    real users before the operator leaves the shadow phase."""
+
+    NGINX_FILES = ("deploy/nginx.conf.example", "waf/nginx-agentwall.conf")
+
+    def test_static_assets_are_not_rate_limited(self):
+        for rel in self.NGINX_FILES:
+            text = read(rel)
+            self.assertIn("map $uri $agentwall_rl_key", text, rel)
+            self.assertIn("limit_req_zone  $agentwall_rl_key", text, rel)
+            self.assertNotIn("limit_req_zone  $binary_remote_addr zone=agentwall_general", text, rel)
+
+    def test_edge_hard_deny_is_shadow_by_default(self):
+        import re
+        for rel in self.NGINX_FILES:
+            text = read(rel)
+            active = "\n".join(active_lines(text))
+            self.assertNotIn("if ($agentwall_bad_ua)", active, rel)
+            self.assertNotIn("if ($agentwall_probe)", active, rel)
+            self.assertIn("if ($agentwall_edge_deny) { return 403; }", active, rel)
+            m = re.search(r"map \$host \$agentwall_edge_enforce \{\s*default (\d);", text)
+            self.assertIsNotNone(m, rel)
+            self.assertEqual(m.group(1), "0", rel)
+
+    def test_auth_location_is_anchored_to_a_path_segment(self):
+        import re
+        for rel in self.NGINX_FILES:
+            text = read(rel)
+            m = re.search(r"location ~\* (\^/\(login[^ ]*) \{", text)
+            self.assertIsNotNone(m, rel)
+            rx = re.compile(m.group(1), re.IGNORECASE)
+            for ok in ("/login", "/auth/callback", "/login.php", "/password/reset"):
+                self.assertTrue(rx.search(ok), (rel, ok))
+            for bad in ("/authors/jane", "/tokenomics", "/verify-email-preview"):
+                self.assertIsNone(rx.search(bad), (rel, bad))
+
+    def test_electron_is_not_a_blocking_marker(self):
+        for rel in self.NGINX_FILES + ("waf/apache-agentwall.conf",):
+            active = "\n".join(active_lines(read(rel)))
+            self.assertNotIn("Electron/", active, rel)
+        # The Lua marker list is covered by tests/lua (is_automation_ua).
+
+    def test_production_example_does_not_trust_broad_private_ranges(self):
+        active = active_lines(read("deploy/nginx.conf.example"))
+        for line in active:
+            self.assertFalse(line.strip().startswith("set_real_ip_from 172.16.0.0/12"), line)
+            self.assertFalse(line.strip().startswith("set_real_ip_from 10.0.0.0/8"), line)
+            self.assertFalse(line.strip().startswith("set_real_ip_from 0.0.0.0/0"), line)
+
+    def test_fail2ban_behaviour_filter_ignores_429_and_static_404(self):
+        import re
+        text = read("fail2ban/filter.d/agentwall-behavior.conf")
+        fail = re.search(r"^failregex = (.+)$", text, re.M).group(1)
+        ignore = re.search(r"^ignoreregex = (.+)$", text, re.M).group(1)
+        to_py = lambda rx: re.compile(rx.replace("<HOST>", r"(?P<host>\S+)"))
+        fail_rx, ignore_rx = to_py(fail), to_py(ignore)
+        line = ('203.0.113.9 - - [27/Oct/2026:12:00:01 +0000] "GET {path} HTTP/1.1" {code} 1 '
+                '"-" "Mozilla/5.0" rt=0.001 urt=- ua_flag=0 probe=0 xff="-"')
+        self.assertTrue(fail_rx.search(line.format(path="/admin", code=404)))
+        self.assertTrue(fail_rx.search(line.format(path="/admin", code=403)))
+        self.assertIsNone(fail_rx.search(line.format(path="/", code=429)))
+        static404 = line.format(path="/static/app.js?v=3", code=404)
+        self.assertTrue(fail_rx.search(static404) and ignore_rx.search(static404))
+        self.assertIsNone(ignore_rx.search(line.format(path="/admin", code=404)))
+
+    def test_fail2ban_auth_filter_is_anchored(self):
+        import re
+        text = read("fail2ban/filter.d/agentwall-auth.conf")
+        fail = re.search(r"^failregex = (.+)$", text, re.M).group(1)
+        rx = re.compile(fail.replace("<HOST>", r"(?P<host>\S+)"))
+        line = ('203.0.113.9 - - [27/Oct/2026:12:00:01 +0000] "POST {path} HTTP/1.1" 401 1 '
+                '"-" "curl/8.5.0" rt=0.001 urt=- ua_flag=0 probe=0 xff="-"')
+        self.assertTrue(rx.search(line.format(path="/login")))
+        self.assertTrue(rx.search(line.format(path="/auth/token?x=1")))
+        self.assertIsNone(rx.search(line.format(path="/authors/jane")))
+
+    def test_behavioural_jails_ship_disabled(self):
+        text = read("fail2ban/jail.d/agentwall.local")
+        enabled = [l.split("=", 1)[1].strip() for l in active_lines(text)
+                   if l.strip().startswith("enabled")]
+        self.assertEqual(enabled, ["false", "false"])
+        self.assertIn("zz-validate-enable-agentwall.local", read("deploy/validate-linux.sh"))
+
+    def test_compose_scorer_can_read_rotated_logs_and_shares_headless_mode(self):
+        try:
+            import yaml
+        except ImportError:  # pragma: no cover
+            self.skipTest("PyYAML not installed")
+        compose = yaml.safe_load(read("deploy/docker-compose.yml"))
+        scorer = compose["services"]["scorer"]
+        self.assertTrue(scorer.get("group_add"), "scorer needs the log group (adm)")
+        self.assertIn("AGENTWALL_HEADLESS_MODE", scorer["environment"])
+        self.assertIn("create 0640 root adm", read("deploy/logrotate/agentwall"))
+
+
 class EnvContractTests(unittest.TestCase):
     """A missing `env NAME;` silently makes Lua fall back to defaults (the
     headless mode default is `mark`, so enforcement would silently not happen)."""

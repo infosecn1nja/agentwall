@@ -47,6 +47,7 @@ env AGENTWALL_HEADLESS_TTL;
 env AGENTWALL_HEADLESS_BLOCK;
 env AGENTWALL_HEADLESS_SUSPECT;
 env AGENTWALL_MIN_SOLVE_MS;
+env AGENTWALL_GET_FALLBACK;
 
 worker_processes auto;
 worker_rlimit_nofile 65535;
@@ -91,7 +92,15 @@ http {
     lua_socket_log_errors off;
 
     # --- rate / connection zones (16 MB per 100k distinct IPs roughly) ------
-    limit_req_zone  $binary_remote_addr zone=agentwall_general:32m rate=15r/s;
+    # Static assets are NOT counted by the general limiter: one cold page view
+    # of a typical site fetches 30-100 same-origin assets at once, and 429s on
+    # them used to push real visitors over the fail2ban behaviour threshold.
+    # An empty key means "not accounted" for limit_req.
+    map $uri $agentwall_rl_key {
+        default $binary_remote_addr;
+        "~*\.(?:css|js|mjs|map|png|jpe?g|gif|svg|ico|webp|avif|woff2?|ttf|otf|eot|mp4|webm)$" "";
+    }
+    limit_req_zone  $agentwall_rl_key   zone=agentwall_general:32m rate=15r/s;
     limit_req_zone  $binary_remote_addr zone=agentwall_auth:32m    rate=5r/m;
     limit_conn_zone $binary_remote_addr zone=agentwall_conn:32m;
     limit_req_status  429;             # fail2ban/SIEM key on 429, not 503
@@ -104,7 +113,8 @@ http {
         # tooling spoofs these; the Lua JS report + timing checks are the real
         # headless detection layer).
         "~*HeadlessChrome"    1;
-        "~*Electron/"         1;
+        # Electron/ is deliberately absent: Slack, Teams, Discord, VS Code and
+        # many in-house desktop apps embed sites in Electron.
         "~*PhantomJS"         1;
         "~*SlimerJS"          1;
         "~*playwright"        1;
@@ -154,6 +164,19 @@ http {
         "~*/etc/passwd"           1;
     }
 
+    # --- edge hard-deny switch (shadow by default) ---------------------------
+    # 0 = shadow: UA/probe matches are only LOGGED (ua_flag=1 / probe=1) so you
+    #     can review them with the rest of the dry-run. 1 = enforce: 403.
+    # Flip to 1 in the enforce phase (deploy/DEPLOYMENT-production.md).
+    map $host $agentwall_edge_enforce {
+        default 0;                      # <-- EDIT to 1 when enforcing
+    }
+    map "$agentwall_edge_enforce:$agentwall_bad_ua:$agentwall_probe" $agentwall_edge_deny {
+        default      0;
+        "~^1:1:"     1;
+        "~^1:\d:1$"  1;
+    }
+
     # --- access log consumed by the scorer + fail2ban -----------------------
     # Keep the combined-format leading fields; only append after them.
     # ua_flag/probe come from the maps above; xff is diagnostic unless the scorer
@@ -174,8 +197,13 @@ http {
     # is the true client, so limits, fail2ban, the scorer and the Lua layer all
     # key on the same address. NEVER use 0.0.0.0/0 in production.
     # ---------------------------------------------------------------------
-    set_real_ip_from 10.0.0.0/8;        # <-- EDIT (example private range)
-    set_real_ip_from 172.16.0.0/12;     # <-- EDIT (example docker/LB range)
+    # Shipped COMMENTED OUT on purpose: broad private ranges are dangerous. If
+    # nginx runs in Docker with published ports, every client arrives from the
+    # bridge gateway (e.g. 172.17.0.1); trusting 172.16.0.0/12 would then let
+    # ANY client choose its own IP via X-Forwarded-For (bypass blocks, or get
+    # someone else blocked). Uncomment with your LB/CDN's exact addresses only.
+    # set_real_ip_from 10.0.10.5/32;    # <-- EDIT: your load balancer(s)
+    # set_real_ip_from 203.0.113.0/24;  # <-- EDIT: your CDN's published ranges
     real_ip_header    X-Forwarded-For;
     real_ip_recursive on;
 
@@ -192,7 +220,10 @@ http {
         listen 80;
         server_name example.com;        # <-- EDIT
 
-        # Terminate TLS here (recommended), or at a CDN/LB in front:
+        # HTTPS IS REQUIRED for the JS challenge: browsers only expose
+        # crypto.subtle (the PoW) in secure contexts, and the clearance cookie
+        # is `Secure`. Over plain HTTP every challenged visitor is stuck on the
+        # interstitial. Terminate TLS here (recommended), or at a CDN/LB in front:
         #   listen 443 ssl http2;
         #   ssl_certificate     /etc/ssl/example.com/fullchain.pem;   # <-- EDIT
         #   ssl_certificate_key /etc/ssl/example.com/privkey.pem;     # <-- EDIT
@@ -200,12 +231,12 @@ http {
         #   ssl_session_cache shared:SSL:10m;
         # and a separate server { listen 80; return 301 https://$host$request_uri; }
 
-        # Hard blocks. A server-scope `if` with `return` on a map variable is a
-        # safe, documented nginx pattern.
-        if ($agentwall_bad_ua) { return 403; }
-        if ($agentwall_probe)  { return 403; }
+        # Hard blocks, gated by $agentwall_edge_enforce (shadow by default). A
+        # server-scope `if` with `return` on a map variable is a safe,
+        # documented nginx pattern.
+        if ($agentwall_edge_deny) { return 403; }
 
-        limit_req  zone=agentwall_general burst=30 nodelay;
+        limit_req  zone=agentwall_general burst=60 nodelay;
         limit_conn agentwall_conn 25;
 
         # Inline ML enforcement (OpenResty/lua-nginx-module). limit_req above
@@ -216,7 +247,9 @@ http {
         access_by_lua_file /etc/nginx/lua/agentwall_challenge_block.lua;
 
         # --- authentication / identity endpoints: tight throttle -------------
-        location ~* ^/(login|signin|sign-in|auth|oauth|token|verify|otp|mfa|2fa|password/(reset|forgot)) {
+        # Whole first path segment only: /auth, /auth/callback, /login.php match;
+        # /authors/jane, /tokenomics, /verify-email-preview do not.
+        location ~* ^/(login|signin|sign-in|auth|oauth|token|verify|otp|mfa|2fa|password/(reset|forgot))(?:[/.]|$) {
             limit_req  zone=agentwall_auth burst=4 nodelay;
             limit_conn agentwall_conn 5;
 

@@ -6,6 +6,57 @@ All notable changes to AgentWall are documented here. The format follows
 
 ## [Unreleased]
 
+### Production hardening (false positives and safe defaults)
+
+- **Self-inflicted fail2ban bans (critical):** the general per-IP limiter
+  (`15r/s burst=30`) also counted static assets, so one cold page view of a
+  typical site produced 429s that pushed real visitors over the
+  `agentwall-behavior` threshold (40 4xx/429 in 60s → firewall ban up to 1 day).
+  Static assets are now exempt from the limiter (`$agentwall_rl_key`), burst is
+  60, and the behaviour filter no longer counts 429 (AgentWall's own rate-limit
+  *and* challenge status) or 404s for static assets. The behavioural jails ship
+  `enabled = false` for the shadow phase.
+- **Headless `mark` mode was not shadow (critical):** with `--enforce` the scorer
+  hard-blocked every challenged key carrying `agentwall:headless`, whatever
+  `AGENTWALL_HEADLESS_MODE` said. New `--headless-mode mark|block` (default from
+  `AGENTWALL_HEADLESS_MODE`, else `mark`); in `mark` the marker is logged
+  (`HEADLESS(mark)`) and counted (`agentwall_headless_marked_total`) only.
+- **Headless false positives on real browsers (critical):** `ANGLE` and `Mesa`
+  were treated as software WebGL, but they are the normal hardware renderer
+  strings of Chrome/Edge on Windows/macOS and of Linux Intel/AMD drivers.
+  Plugin/MIME, `window.chrome`, PDF-viewer and window-geometry checks are now
+  desktop-only: Android WebView in-app browsers (Instagram, Facebook, TikTok,
+  LINE) scored exactly the 0.60 block threshold. SwiftShader + empty plugins is
+  still caught behind a spoofed phone UA.
+- **Scorer crash loop after log rotation (critical):** logrotate recreates the
+  log `0640 root adm`; the compose scorer (uid 10001) lost read access and
+  crash-looped on `PermissionError`, silently ending enforcement. Compose now
+  adds the log group (`group_add`, `AGENTWALL_LOG_GID`, default 4), and the
+  scorer waits and logs instead of crashing while the log is unreadable.
+- **Edge 403s ignored the dry-run phase:** `if ($agentwall_bad_ua|probe) return
+  403` now goes through `$agentwall_edge_deny`, gated by
+  `$agentwall_edge_enforce` (default 0 = log only).
+- **`Electron/` removed from the blocking UA markers** (nginx, Apache, Lua):
+  Slack/Teams/Discord/VS Code and in-house desktop apps embed sites in Electron.
+- **Auth path regexes anchored to a path segment** (nginx locations, Apache,
+  scorer `AUTH_RE`, fail2ban auth filter): `/authors/...`, `/tokenomics`,
+  `/verify-email-preview` no longer get the 5 req/min login limit or count as
+  auth traffic.
+- **`set_real_ip_from` no longer ships `10.0.0.0/8` / `172.16.0.0/12` active** in
+  `deploy/nginx.conf.example`: behind Docker's published ports every client is
+  the bridge gateway, which made X-Forwarded-For client-controlled.
+- **GET fallback cannot bypass headless detection in block mode:** new
+  `AGENTWALL_GET_FALLBACK=auto|on|off` (`auto` = off in `block` mode).
+- HTTPS requirement for the JS challenge is documented next to the listener.
+
+### Fixed (tooling)
+
+- Restored `.github/workflows/ci.yml` (unit/config/Lua, preflight, real e2e,
+  Linux validation); the config tests and docs referenced it but it was missing.
+- `tests/e2e-real/run.sh` failed on native Linux Docker: the `mktemp -d` (0700)
+  workdir was unreadable by the OpenResty `nobody` workers. Permissions are now
+  set explicitly.
+
 ### Security fixes
 
 - **XFF keying mismatch (H-1):** the scorer no longer trusts the left-most

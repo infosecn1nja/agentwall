@@ -20,7 +20,7 @@
 #        - jail load test + effective maxretry/findtime/bantime per jail
 #          (catches the "trailing '#' comment silently drops the option" bug)
 #        - fail2ban-regex counts against synthetic nginx access logs:
-#            agentwall-behavior vs 404/429/403 (+ a normal 200)  -> 3 matched
+#            agentwall-behavior vs 404/403 (+ 429, static 404, 200) -> 2 matched, 1 ignored
 #            agentwall-auth     vs 401/403 on /login (+ 404)      -> 2 matched
 #            agentwall-ml       vs mixed lines                    -> 0 matched
 #        - the same fail2ban checks are re-run on ubuntu:22.04, which ships
@@ -394,6 +394,13 @@ if [ "${RUN_FAIL2BAN:-0}" = 1 ]; then
     printf '[sshd]\nenabled = false\n' > /etc/fail2ban/jail.d/99-validate-disable-sshd.local
     i "disabled distro [sshd] jail for the container run (backend=systemd, no systemd PID 1 here)"
 
+    # The behavioural jails ship enabled = false (shadow phase). Validate them
+    # exactly as an operator enables them in the enforce phase (zz- sorts after
+    # agentwall.local, so it overrides enabled = false).
+    printf '[agentwall-behavior]\nenabled = true\n\n[agentwall-auth]\nenabled = true\n' \
+        > /etc/fail2ban/jail.d/zz-validate-enable-agentwall.local
+    i "enabled agentwall-behavior/agentwall-auth for the load test (shipped disabled)"
+
     # --- config test ------------------------------------------------------
     out=$(fail2ban-client -t 2>&1); rc=$?
     printf '%s\n' "$out" | r
@@ -460,6 +467,7 @@ if [ "${RUN_FAIL2BAN:-0}" = 1 ]; then
 203.0.113.10 - - [27/Oct/2026:12:00:01 +0000] "GET /admin HTTP/1.1" 404 153 "-" "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" rt=0.002 urt=- ua_flag=0 probe=0 xff="-"
 203.0.113.11 - - [27/Oct/2026:12:00:02 +0000] "GET /api/users?page=2 HTTP/1.1" 429 41 "-" "python-requests/2.31.0" rt=0.001 urt=- ua_flag=0 probe=0 xff="198.51.100.7"
 203.0.113.12 - - [27/Oct/2026:12:00:03 +0000] "POST /wp-login.php HTTP/1.1" 403 199 "-" "Mozilla/5.0 (compatible; Nmap Scripting Engine; https://nmap.org/book/nse.html)" rt=0.003 urt=- ua_flag=1 probe=0 xff="-"
+203.0.113.13 - - [27/Oct/2026:12:00:03 +0000] "GET /static/app.3f9c.js?v=2 HTTP/1.1" 404 153 "https://example.com/" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" rt=0.001 urt=- ua_flag=0 probe=0 xff="-"
 198.51.100.20 - - [27/Oct/2026:12:00:04 +0000] "GET / HTTP/1.1" 200 5320 "https://example.com/" "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" rt=0.010 urt=0.008 ua_flag=0 probe=0 xff="-"
 LOG
     cat > "$LOGDIR/auth.log" <<'LOG'
@@ -495,7 +503,7 @@ LOG
             printf '%s\n' "$out" | tail -10 | r
         fi
     }
-    regex_check "agentwall-behavior regex vs nginx 404/429/403 (+200)" "$LOGDIR/behavior.log" /etc/fail2ban/filter.d/agentwall-behavior.conf 3 0
+    regex_check "agentwall-behavior regex vs nginx 404/403 (429/static-404/200 not counted)" "$LOGDIR/behavior.log" /etc/fail2ban/filter.d/agentwall-behavior.conf 2 1
     regex_check "agentwall-auth regex vs 401/403 login (+404/200)" "$LOGDIR/auth.log" /etc/fail2ban/filter.d/agentwall-auth.conf 2 0
     regex_check "agentwall-ml regex vs mixed log (must never match)" "$LOGDIR/ml.log" /etc/fail2ban/filter.d/agentwall-ml.conf 0 1
 fi

@@ -68,6 +68,11 @@ fi
 # --- isolated workspace ------------------------------------------------------
 mkdir -p "$WORK/lua" "$WORK/nginx/conf" "$WORK/nginx/logs" "$WORK/logs" "$WORK/state"
 cp "$REPO_ROOT"/nginx-lua/*.lua "$WORK/lua/"
+# mktemp -d is 0700: the OpenResty workers run as `nobody` inside the
+# container and must be able to traverse the bind mount and read the Lua files
+# (Docker Desktop hides this; native Linux Docker and CI do not).
+chmod 0755 "$WORK" "$WORK/lua" "$WORK/nginx" "$WORK/nginx/conf"
+chmod 0644 "$WORK"/lua/*.lua
 
 cat > "$WORK/nginx/conf/nginx.conf" <<EOF
 env AGENTWALL_REDIS_HOST;
@@ -85,6 +90,7 @@ env AGENTWALL_HEADLESS_TTL;
 env AGENTWALL_HEADLESS_BLOCK;
 env AGENTWALL_HEADLESS_SUSPECT;
 env AGENTWALL_MIN_SOLVE_MS;
+env AGENTWALL_GET_FALLBACK;
 
 worker_processes 1;
 error_log ${WORK}/nginx/logs/error.log warn;
@@ -161,6 +167,7 @@ docker run -d --name agentwall-e2e-openresty --network agentwall-e2e-net \
     -e AGENTWALL_CHAL_SECRET="$CHAL_SECRET" -e AGENTWALL_POW_DIFF=3 \
     -e AGENTWALL_CHAL_TTL=300 -e AGENTWALL_CLR_TTL=300 \
     -e AGENTWALL_HEADLESS_MODE=block -e AGENTWALL_HEADLESS_TTL=300 -e AGENTWALL_MIN_SOLVE_MS=250 \
+    -e AGENTWALL_GET_FALLBACK=on \
     -v "$WORK:$WORK" openresty/openresty:alpine \
     /usr/local/openresty/bin/openresty -g 'daemon off;' -c "$WORK/nginx/conf/nginx.conf" >/dev/null \
     || die "could not start OpenResty"
@@ -230,7 +237,8 @@ curl -s -o /dev/null -A 'Mozilla/5.0 HeadlessChrome/124.0.0.0' \
 rdb set agentwall:challenge:203.0.113.24 1 300 >/dev/null
 check 403 "$(code 203.0.113.24)" "B13 automation-UA marker denies the next challenged request"
 
-# B14: GET fallback (?agentwall_id&agentwall_pow) still works for backward compatibility
+# B14: GET fallback (?agentwall_id&agentwall_pow) works when explicitly enabled
+# (AGENTWALL_GET_FALLBACK=on; the default in block mode is off)
 rdb set agentwall:challenge:203.0.113.25 1 300 >/dev/null
 curl -s -H 'X-Forwarded-For: 203.0.113.25' "$URL/" -o "$WORK/challenge-get.html"
 read -r GID GNONCE _ < <("$PY" "$E2E_DIR/solve_pow.py" "$WORK/challenge-get.html")
@@ -304,7 +312,7 @@ echo "=== D. REAL scorer (river + redis) -> Redis -> OpenResty ==="
 rm -f "$WORK/state/model.pkl"
 : > "$WORK/logs/agentwall_access.log"
 PYTHONUNBUFFERED=1 "$PY" "$REPO_ROOT/scorer/agentwall_scorer.py" \
-    --log "$WORK/logs/agentwall_access.log" --enforce --backend redis \
+    --log "$WORK/logs/agentwall_access.log" --enforce --backend redis --headless-mode block \
     --redis-url "redis://:${REDIS_PASS}@127.0.0.1:${REDIS_PORT}/0" \
     --warmup 0 --min-events 1 --cooldown 0 --challenge-grace 5 \
     --floor-block 0.15 --floor-watch 0.05 --p-block 0.99 --p-watch 0.95 \

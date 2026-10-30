@@ -102,9 +102,15 @@ Verify before traffic:
 ```bash
 ./deploy/preflight.sh --use-xff --backend redis   # log format, secrets, config regressions
 ./deploy/validate-linux.sh                        # systemd/fail2ban/Apache/OpenResty in Docker
-./tests/run-tests.sh                              # 82 Python + 219 Lua assertions
+./tests/run-tests.sh                              # 99 Python tests + 238 Lua assertions
 ./tests/e2e-real/run.sh                           # real 403/challenge/headless/agent profiles (64 assertions)
 ```
+
+Production-safe defaults: everything that can turn away a visitor starts in
+shadow — scorer dry-run, edge UA/probe 403s gated by `$agentwall_edge_enforce`
+(0 = log only), behavioural fail2ban jails `enabled = false`, headless `mark`.
+Static assets are exempt from the per-IP request limiter, the JS challenge
+needs HTTPS, and `set_real_ip_from` ships commented out (list only your LB/CDN).
 
 Then roll out in stages — shadow (dry-run) → challenge-only → enforce. Do not
 skip the shadow phase: thresholds and the ML baseline must fit **your** traffic.
@@ -120,7 +126,9 @@ solve timing. A positive verdict writes `agentwall:headless:<key>`, which:
 - the Lua layer denies on challenged requests when `AGENTWALL_HEADLESS_MODE=block`, and
 - the scorer treats as a **hard block** (even if the client solved the PoW).
 
-Start in `AGENTWALL_HEADLESS_MODE=mark` (default): detect, log, mark — no block.
+Start in `AGENTWALL_HEADLESS_MODE=mark` (default): detect, log, mark — no block,
+at the edge **and** in the scorer (the scorer reads the same variable, or
+`--headless-mode`; keep both equal and switch them together).
 Switch to `block` after reviewing false positives. This reliably catches default
 Playwright/Puppeteer/headless Chromium; stealth-patched browsers can spoof these
 surfaces, so treat it as advisory signal (details:

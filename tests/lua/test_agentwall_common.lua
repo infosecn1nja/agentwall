@@ -406,7 +406,6 @@ section("is_automation_ua")
 local AUTOMATION_UAS = {
     "HeadlessChrome",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Electron/28.0.0 Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 Playwright/1.40.0",
     "Mozilla/5.0 puppeteer/21.0",
     "Mozilla/5.0 Selenium/4.0",
@@ -431,6 +430,19 @@ falsy("empty UA", C.is_automation_ua(""))
 falsy("nil UA", C.is_automation_ua(nil))
 falsy("number UA", C.is_automation_ua(123))
 falsy("unrelated UA", C.is_automation_ua("Artemis/1.0 (compatible)"))
+falsy("Electron desktop app UA is not automation (Slack/Teams/VS Code embed sites)",
+      C.is_automation_ua("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Electron/28.0.0 Chrome/120.0.0.0 Safari/537.36"))
+
+section("is_mobile_ua")
+truthy("Android Chrome is mobile", C.is_mobile_ua(
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"))
+truthy("Android WebView is mobile", C.is_mobile_ua(
+    "Mozilla/5.0 (Linux; Android 13; SM-A536E; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/124.0.0.0 Mobile Safari/537.36 Instagram 330.0"))
+truthy("iPhone is mobile", C.is_mobile_ua(
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1"))
+falsy("desktop Chrome is not mobile", C.is_mobile_ua(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"))
+falsy("nil UA is not mobile", C.is_mobile_ua(nil))
 
 -- =============================================================================
 -- safe_relative_path (server-side redirect validation)
@@ -576,6 +588,79 @@ local ch_missing_http = score_of(REAL_CHROME, {
     min_solve_ms = 250, solve_ms = 1200, scheme = "http" })
 eq("missing Client Hints on plain HTTP is not penalised", ch_missing_http, 0)
 
+-- Real browsers with HARDWARE GPUs that report ANGLE / Mesa renderer strings
+-- (the normal Chrome/Edge strings on Windows/macOS, and Mesa on Linux) must
+-- stay at 0: "ANGLE" and "Mesa" are not software rasterizers.
+local function with(base, overrides)
+    local t = {}
+    for k, v in pairs(base) do t[k] = v end
+    for k, v in pairs(overrides) do t[k] = v end
+    return t
+end
+local GOOD = { min_solve_ms = 250, solve_ms = 1500 }
+eq("Windows Chrome with ANGLE/D3D11 hardware renderer scores 0", score_of(with(REAL_CHROME, {
+    webglVendor = "Google Inc. (NVIDIA)",
+    webglRenderer = "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 (0x00002503) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+}), GOOD), 0)
+eq("macOS Chrome with ANGLE Metal renderer scores 0", score_of(with(REAL_CHROME, {
+    ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    webglVendor = "Google Inc. (Apple)",
+    webglRenderer = "ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)",
+}), GOOD), 0)
+eq("Linux Chrome with Mesa Intel hardware driver scores 0", score_of(with(REAL_CHROME, {
+    ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    webglVendor = "Google Inc. (Intel)",
+    webglRenderer = "ANGLE (Intel, Mesa Intel(R) UHD Graphics 620 (KBL GT2), OpenGL 4.6)",
+}), GOOD), 0)
+
+-- Mobile browsers legitimately have no plugins/MIME types/PDF viewer, and
+-- Android WebView (Instagram/Facebook/TikTok/LINE in-app browsers) has no
+-- window.chrome. None of these may reach the suspect threshold.
+local ANDROID_CHROME = {
+    webdriver = false, cdp = false,
+    ua = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) " ..
+         "Chrome/124.0.0.0 Mobile Safari/537.36",
+    languages = { "id-ID", "id", "en-US" },
+    plugins = 0, mimeTypes = 0, chrome = true,
+    webglVendor = "Google Inc. (Qualcomm)",
+    webglRenderer = "ANGLE (Qualcomm, Adreno (TM) 740, OpenGL ES 3.2)",
+    hardwareConcurrency = 8, deviceMemory = 8,
+    screenW = 412, screenH = 915, outerW = 412, outerH = 839,
+    pdfViewer = false, touchPoints = 5,
+}
+local ch124 = { min_solve_ms = 250, solve_ms = 1500,
+                sec_ch_ua = '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+                scheme = "https" }
+local android_score = score_of(ANDROID_CHROME, ch124)
+truthy("Android Chrome (ANGLE, no plugins, no PDF viewer) below suspect", android_score < 0.35, android_score)
+local WEBVIEW = with(ANDROID_CHROME, {
+    ua = "Mozilla/5.0 (Linux; Android 13; SM-A536E; wv) AppleWebKit/537.36 (KHTML, like Gecko) " ..
+         "Version/4.0 Chrome/124.0.0.0 Mobile Safari/537.36 Instagram 330.0.0.40.92 Android",
+    chrome = false,
+})
+local webview_score = score_of(WEBVIEW, ch124)
+truthy("Android WebView in-app browser below suspect", webview_score < 0.35, webview_score)
+truthy("Android WebView without Client Hints still below block",
+       score_of(WEBVIEW, { min_solve_ms = 250, solve_ms = 1500, scheme = "https" }) < 0.60)
+local IPHONE = {
+    webdriver = false, cdp = false,
+    ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 " ..
+         "(KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+    languages = { "id-ID" }, plugins = 0, mimeTypes = 0, chrome = false,
+    webglVendor = "Apple Inc.", webglRenderer = "Apple GPU",
+    hardwareConcurrency = 4, screenW = 390, screenH = 844, outerW = 390, outerH = 844,
+    pdfViewer = false, touchPoints = 5,
+}
+eq("iPhone Safari scores 0", score_of(IPHONE, GOOD), 0)
+-- A desktop headless browser that only spoofs a phone UA still renders with
+-- SwiftShader and keeps its automation flags: it must still be caught.
+local SPOOFED_PHONE = with(PLAYWRIGHT_HEADLESS, { ua = ANDROID_CHROME.ua })
+truthy("headless Chromium spoofing an Android UA still blocked",
+       score_of(SPOOFED_PHONE, { min_solve_ms = 250, solve_ms = 120 }) >= 0.60)
+local SPOOFED_PHONE_NO_FLAGS = with(SPOOFED_PHONE, { webdriver = false, cdp = false })
+truthy("SwiftShader + empty plugins behind a phone UA is at least suspect",
+       score_of(SPOOFED_PHONE_NO_FLAGS, GOOD) >= 0.35)
+
 -- Report missing / not a table -> high score.
 truthy("nil report scores high", score_of(nil) >= 0.4)
 truthy("string report scores high", score_of("nope") >= 0.4)
@@ -631,6 +716,7 @@ do
     eq("default headless block", cfg.headless_block, 0.60)
     eq("default headless suspect", cfg.headless_suspect, 0.35)
     eq("default min solve ms", cfg.min_solve_ms, 250)
+    eq("GET fallback on by default in mark mode", cfg.get_fallback, true)
 
     local values = {
         AGENTWALL_HEADLESS_MODE = "BLOCK",
@@ -648,6 +734,19 @@ do
     eq("headless suspect ratio clamped low", cfg.headless_suspect, 0)
     eq("pow diff still clamped 3..6", cfg.pow_diff, 6)
     eq("bad int env falls back to default", cfg.min_solve_ms, 250)
+    eq("GET fallback auto -> off in block mode", cfg.get_fallback, false)
+    values.AGENTWALL_GET_FALLBACK = "ON"
+    eq("GET fallback can be forced on in block mode",
+       C.load_challenge_config().get_fallback, true)
+    values.AGENTWALL_GET_FALLBACK = "off"
+    values.AGENTWALL_HEADLESS_MODE = "mark"
+    eq("GET fallback can be forced off in mark mode",
+       C.load_challenge_config().get_fallback, false)
+    values.AGENTWALL_GET_FALLBACK = "garbage"
+    eq("unknown GET fallback value means auto",
+       C.load_challenge_config().get_fallback, true)
+    values.AGENTWALL_GET_FALLBACK = nil
+    values.AGENTWALL_HEADLESS_MODE = "BLOCK"
 
     values.AGENTWALL_HEADLESS_MODE = "wat"
     values.AGENTWALL_HEADLESS_TTL = "999999999"

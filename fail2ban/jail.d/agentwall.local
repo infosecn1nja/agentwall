@@ -47,7 +47,9 @@
 # LINES. deploy/validate-linux.sh fails on any "Wrong value for ..." warning.
 
 [agentwall-behavior]
-enabled  = true
+# Shipped disabled (shadow phase). Enable after reviewing fail2ban-regex output
+# against your own logs - see deploy/DEPLOYMENT-production.md.
+enabled  = false
 filter   = agentwall-behavior
 # nginx (default): /var/log/nginx/agentwall_access.log
 # apache:          /var/log/apache2/agentwall_access.log
@@ -66,7 +68,9 @@ ignoreip = 127.0.0.1/8 ::1
 #banaction = nftables-multiport
 
 [agentwall-auth]
-enabled  = true
+# Shipped disabled (shadow phase). Enable after reviewing fail2ban-regex output
+# against your own logs - see deploy/DEPLOYMENT-production.md.
+enabled  = false
 filter   = agentwall-auth
 logpath  = /var/log/nginx/agentwall_access.log
 # 10 denied auth hits within 2 min = 30 min ban, aligned with the scorer's

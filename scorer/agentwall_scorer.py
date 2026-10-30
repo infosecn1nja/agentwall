@@ -95,8 +95,11 @@ LOG_RE = re.compile(
     r'(?:\s+xff="(?P<xff>[^"]*)")?'
 )
 
+# Whole path segment only: "/auth", "/auth/callback", "/login.php" match;
+# "/authors/jane", "/tokenomics", "/verify-email-preview" do not.
 AUTH_RE = re.compile(
-    r'/(login|signin|sign-in|auth|oauth|token|verify|otp|mfa|2fa|password/(reset|forgot))',
+    r'/(login|signin|sign-in|auth|oauth|token|verify|otp|mfa|2fa|password/(reset|forgot))'
+    r'(?=[/.?;]|$)',
     re.IGNORECASE,
 )
 STATIC_EXT = {
@@ -766,11 +769,33 @@ def read_once(path):
             yield line
 
 
+def _open_log(path, sleep=time.sleep):
+    """Open the access log, waiting (never crashing) while it is missing or unreadable.
+
+    logrotate recreates the file (``create 0640 root adm``); a scorer that is not
+    in the log's group used to die with PermissionError on the first reopen and
+    crash-loop, silently ending enforcement. Keep retrying and say why, loudly.
+    """
+    last_log = 0.0
+    while True:
+        try:
+            return open(path, "r", errors="replace")
+        except FileNotFoundError:
+            reason = "waiting for log file"
+            level = logging.INFO
+        except PermissionError:
+            reason = ("cannot read log file (permission denied) -- run the scorer in the "
+                      "log's group (systemd: SupplementaryGroups=adm; docker: group_add)")
+            level = logging.ERROR
+        now = time.time()
+        if now - last_log >= 30.0:
+            logging.log(level, "%s: %s (retrying)", reason, path)
+            last_log = now
+        sleep(1)
+
+
 def tail(path, from_start=False):
-    while not os.path.exists(path):
-        logging.info("waiting for log file: %s", path)
-        time.sleep(1)
-    f = open(path, "r", errors="replace")
+    f = _open_log(path)
     inode = os.fstat(f.fileno()).st_ino
     if not from_start:
         f.seek(0, os.SEEK_END)
@@ -781,12 +806,14 @@ def tail(path, from_start=False):
             continue
         time.sleep(0.25)
         try:
-            if os.stat(path).st_ino != inode or os.stat(path).st_size < f.tell():
-                f.close()
-                f = open(path, "r", errors="replace")
-                inode = os.fstat(f.fileno()).st_ino
-        except FileNotFoundError:
+            st = os.stat(path)
+        except OSError:
             time.sleep(1)
+            continue
+        if st.st_ino != inode or st.st_size < f.tell():
+            f.close()
+            f = _open_log(path)
+            inode = os.fstat(f.fileno()).st_ino
 
 
 # --- Decision (pure, unit-testable) ------------------------------------------
@@ -875,6 +902,11 @@ def build_argparser():
     ap.add_argument("--cooldown", type=float, default=120.0,
                     help="seconds between challenge/block/watch actions on one key")
     ap.add_argument("--enforce", action="store_true", help="actually act (default: dry-run)")
+    ap.add_argument("--headless-mode", choices=["mark", "block"],
+                    default=(os.environ.get("AGENTWALL_HEADLESS_MODE") or "mark").strip().lower(),
+                    help="what the scorer does with the Lua agentwall:headless marker: 'mark' "
+                         "(default) only logs/counts it, 'block' hard-blocks challenged keys. "
+                         "Keep it equal to the edge's AGENTWALL_HEADLESS_MODE")
     ap.add_argument("--dry-run", action="store_true", help="explicit dry-run (the default)")
     ap.add_argument("--backend", choices=["none", "fail2ban", "redis", "both"], default="none")
     ap.add_argument("--jail", default="agentwall-ml")
@@ -921,6 +953,8 @@ def validate_args(args):
     errors = []
     if args.enforce and args.dry_run:
         errors.append("--enforce and --dry-run are mutually exclusive")
+    if args.headless_mode not in ("mark", "block"):
+        errors.append("--headless-mode / AGENTWALL_HEADLESS_MODE must be 'mark' or 'block'")
     if args.enforce and args.backend == "none":
         errors.append("--enforce requires --backend redis, fail2ban or both")
     if args.use_xff:
@@ -1041,6 +1075,9 @@ def main(argv=None):
     xff_warned = False
 
     mode = "ENFORCE" if args.enforce else "DRY-RUN"
+    if args.enforce and args.headless_mode == "mark":
+        logging.info("headless marker policy: mark (logged, not blocked); set "
+                     "--headless-mode block / AGENTWALL_HEADLESS_MODE=block to enforce it")
     metrics.set("agentwall_warmup_done", 0)
     if act.redis is not None:
         metrics.set("agentwall_redis_up", 1)
@@ -1147,15 +1184,24 @@ def main(argv=None):
                 continue
 
             # Headless/automation marker written by the Lua human-verification
-            # step: a solved PoW or a clearance cookie does not excuse it.
+            # step: a solved PoW or a clearance cookie does not excuse it -- but
+            # only in headless block mode. In mark mode (the shadow default) the
+            # marker is counted/logged and the key goes through the normal
+            # decision path, matching the edge's AGENTWALL_HEADLESS_MODE=mark.
             if act.enforce and w.challenged_at and act.is_headless(key):
                 metrics.inc("agentwall_headless_total")
-                if ev["ts"] - w.last_block >= args.cooldown:
-                    act.block(key, suspicion, "headless-automation-detected", raw_ip=ip)
-                    w.last_block = ev["ts"]
-                    w.challenged_at = 0.0
-                    metrics.inc("agentwall_block_total")
-                continue
+                if args.headless_mode == "block":
+                    if ev["ts"] - w.last_block >= args.cooldown:
+                        act.block(key, suspicion, "headless-automation-detected", raw_ip=ip)
+                        w.last_block = ev["ts"]
+                        w.challenged_at = 0.0
+                        metrics.inc("agentwall_block_total")
+                    continue
+                if ev["ts"] - w.last_watch >= args.cooldown:
+                    logging.warning("HEADLESS(mark) ip=%s key=%s suspicion=%.3f -- not blocked "
+                                    "(--headless-mode=mark)", ip, key, suspicion)
+                    w.last_watch = ev["ts"]
+                    metrics.inc("agentwall_headless_marked_total")
 
             # A client that passed the verified JS challenge gets a pass unless
             # the hard signal says otherwise (a solved PoW does not excuse a probe).

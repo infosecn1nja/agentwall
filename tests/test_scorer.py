@@ -447,6 +447,155 @@ class BatchAndModelTests(unittest.TestCase):
         self.assertTrue(args.once)
 
 
+class AuthPathTests(unittest.TestCase):
+    """AUTH_RE must match whole auth path segments only (no /authors, /tokenomics)."""
+
+    def test_auth_segments_match(self):
+        for path in ("/login", "/login.php", "/auth", "/auth/callback", "/api/oauth/token",
+                     "/admin/login?next=/x", "/password/reset", "/verify", "/2fa;jsessionid=1"):
+            self.assertTrue(s.AUTH_RE.search(path), path)
+
+    def test_lookalike_paths_do_not_match(self):
+        for path in ("/authors/jane", "/tokenomics", "/verify-email-preview", "/loginhelp",
+                     "/blog/authentication-guide", "/otpauth-explained"):
+            self.assertIsNone(s.AUTH_RE.search(path), path)
+
+
+class HeadlessModeTests(unittest.TestCase):
+    def test_default_is_mark(self):
+        old = os.environ.pop("AGENTWALL_HEADLESS_MODE", None)
+        try:
+            args = s.build_argparser().parse_args(["--log", "x"])
+        finally:
+            if old is not None:
+                os.environ["AGENTWALL_HEADLESS_MODE"] = old
+        self.assertEqual(args.headless_mode, "mark")
+
+    def test_env_sets_mode_and_bad_env_is_rejected(self):
+        old = os.environ.get("AGENTWALL_HEADLESS_MODE")
+        try:
+            os.environ["AGENTWALL_HEADLESS_MODE"] = "BLOCK"
+            args = s.build_argparser().parse_args(["--log", "x"])
+            self.assertEqual(args.headless_mode, "block")
+            self.assertEqual(s.validate_args(args), [])
+            os.environ["AGENTWALL_HEADLESS_MODE"] = "wat"
+            args = s.build_argparser().parse_args(["--log", "x"])
+            self.assertTrue(any("headless-mode" in e for e in s.validate_args(args)))
+        finally:
+            if old is None:
+                os.environ.pop("AGENTWALL_HEADLESS_MODE", None)
+            else:
+                os.environ["AGENTWALL_HEADLESS_MODE"] = old
+
+    def test_cli_flag(self):
+        args = s.build_argparser().parse_args(["--log", "x", "--headless-mode", "block"])
+        self.assertEqual(args.headless_mode, "block")
+
+
+class FakeRedisStore:
+    """Tiny in-memory stand-in for redis.Redis used by the main-loop tests."""
+
+    def __init__(self):
+        self.data = {}
+
+    @classmethod
+    def from_url(cls, *args, **kwargs):
+        return cls._instance
+
+    def ping(self):
+        return True
+
+    def set(self, key, value, ex=None):
+        self.data[key] = value
+
+    def delete(self, key):
+        self.data.pop(key, None)
+
+    def exists(self, key):
+        return 1 if key in self.data else 0
+
+
+class MainLoopHeadlessTests(unittest.TestCase):
+    """End-to-end through main(): the Lua headless marker must only hard-block in
+    --headless-mode block (mark mode is the shadow default)."""
+
+    IP = "203.0.113.31"
+
+    def _run(self, headless_mode):
+        import sys
+        import types
+        store = FakeRedisStore()
+        FakeRedisStore._instance = store
+        fake = types.ModuleType("redis")
+        fake.Redis = FakeRedisStore
+        saved = sys.modules.get("redis")
+        sys.modules["redis"] = fake
+        # Pre-set the marker: the Lua layer wrote it while the key was challenged.
+        store.data["agentwall:headless:" + self.IP] = "1"
+        lines = []
+        for i in range(30):
+            lines.append(
+                '{ip} - - [27/Oct/2026:20:46:{sec:02d} +0700] "GET /probe{i} HTTP/1.1" 404 12 '
+                '"-" "curl/8.4.0" rt=0.001 urt=0.001 ua_flag=0 probe=1 xff="-"'.format(
+                    ip=self.IP, sec=i, i=i))
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                log = os.path.join(tmp, "access.log")
+                with open(log, "w") as fh:
+                    fh.write("\n".join(lines) + "\n")
+                s.main(["--log", log, "--once", "--enforce", "--backend", "redis",
+                        "--headless-mode", headless_mode, "--warmup", "0",
+                        "--min-events", "1", "--cooldown", "0",
+                        "--challenge-grace", "100000", "--floor-block", "0.05",
+                        "--floor-watch", "0.01", "--no-verify-bots",
+                        "--log-level", "CRITICAL"])
+        finally:
+            if saved is None:
+                sys.modules.pop("redis", None)
+            else:
+                sys.modules["redis"] = saved
+        return store
+
+    def test_mark_mode_does_not_block_on_marker(self):
+        store = self._run("mark")
+        self.assertIn("agentwall:challenge:" + self.IP, store.data,
+                      "precondition: the scorer must have challenged the key")
+        self.assertNotIn("agentwall:block:" + self.IP, store.data)
+
+    def test_block_mode_blocks_on_marker(self):
+        store = self._run("block")
+        self.assertIn("agentwall:block:" + self.IP, store.data)
+
+
+class TailPermissionTests(unittest.TestCase):
+    def test_unreadable_log_is_retried_not_fatal(self):
+        calls = {"n": 0}
+        real_open = open
+
+        def flaky_open(path, *args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise PermissionError(13, "Permission denied", path)
+            return real_open(path, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "access.log")
+            with real_open(path, "w") as fh:
+                fh.write("x\n")
+            sleeps = []
+            import builtins
+            builtins.open = flaky_open
+            try:
+                fh = s._open_log(path, sleep=sleeps.append)
+            finally:
+                builtins.open = real_open
+            try:
+                self.assertEqual(fh.read(), "x\n")
+            finally:
+                fh.close()
+        self.assertEqual(len(sleeps), 2)
+
+
 class AllowlistTests(unittest.TestCase):
     def test_cidr_and_bad_entry(self):
         allow = s.Allowlist(["10.0.0.0/8", "::1/128", "not-a-cidr", "  "])

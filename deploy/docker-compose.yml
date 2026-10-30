@@ -66,6 +66,17 @@ services:
       - "INFO"
     environment:
       REDIS_URL: "redis://:${REDIS_PASS:?REDIS_PASS is required - create deploy/.env}@redis:6379/0"
+      # Must equal the edge's AGENTWALL_HEADLESS_MODE. "mark" = the Lua headless
+      # marker is only logged/counted; "block" = challenged keys carrying it are
+      # hard-blocked (only after reviewing headless false positives).
+      AGENTWALL_HEADLESS_MODE: "${AGENTWALL_HEADLESS_MODE:-mark}"
+    # The scorer runs as uid 10001. logrotate recreates the access log as
+    # `0640 root adm`, so the container must carry the host's `adm` GID to keep
+    # reading it after the first rotation (4 on Debian/Ubuntu; check with
+    # `getent group adm`). Without it the scorer cannot read the log and
+    # enforcement silently stops.
+    group_add:
+      - "${AGENTWALL_LOG_GID:-4}"
     volumes:
       - /var/log/nginx:/logs:ro          # read the proxy's access log (read-only)
       - scorer_state:/state              # the ONLY path the scorer writes

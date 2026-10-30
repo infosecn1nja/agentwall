@@ -176,9 +176,14 @@ known-good traffic across the weekly cycle, and a clean
 ### Phase 2 — challenge-only
 
 - Set `"AGENTWALL_CHAL_SECRET"` in the nginx environment and reload.
-- Keep `AGENTWALL_HEADLESS_MODE=mark` (default): headless/automation detections are
-  recorded (`agentwall:headless:*`, WARN log, `agentwall_headless_total`) but not blocked
-  yet. Switch to `block` in phase 3.
+- Keep `AGENTWALL_HEADLESS_MODE=mark` (default) at the edge **and** in the scorer
+  (`AGENTWALL_HEADLESS_MODE` in `/etc/agentwall-scorer.env` / compose, or
+  `--headless-mode`): headless/automation detections are recorded
+  (`agentwall:headless:*`, WARN / `HEADLESS(mark)` log lines,
+  `agentwall_headless_total`, `agentwall_headless_marked_total`) but nobody is
+  blocked for them yet. Switch both to `block` in phase 3.
+- The JS challenge requires HTTPS as seen by the browser (`crypto.subtle` and the
+  `Secure` clearance cookie). Over plain HTTP challenged visitors are stuck.
 - Enable the scorer with `--enforce --backend redis`, but keep `--p-block` high
   (e.g. `0.995`) so almost nothing hard-blocks; suspects get the JS PoW challenge.
 - Watch the challenge-pass ratio, `agentwall_cleared_total`, and support tickets.
@@ -188,10 +193,16 @@ known-good traffic across the weekly cycle, and a clean
 ### Phase 3 — enforce
 
 Lower `--p-block` back to ~0.99. Hard signal and persist-after-challenge now
-escalate to real blocks. Flip `AGENTWALL_HEADLESS_MODE=block` once the `mark`-mode
-telemetry (`agentwall_headless_total`, `AgentWallHeadlessDetected`, WARN lines) has been
-reviewed for false positives. Keep the behavioural fail2ban jails enabled if desired
-(see §7 for their privilege caveat). Verify rollback (§4) before you need it.
+escalate to real blocks. Flip `AGENTWALL_HEADLESS_MODE=block` (edge **and**
+scorer) once the `mark`-mode telemetry (`agentwall_headless_total`,
+`AgentWallHeadlessDetected`, WARN / `HEADLESS(mark)` lines) has been reviewed for
+false positives — check mobile and in-app-browser traffic specifically.
+Set `$agentwall_edge_enforce` to `1` in nginx.conf once the `ua_flag=1` /
+`probe=1` log lines have been reviewed. Enable the behavioural fail2ban jails
+(`enabled = true` in `jail.d/agentwall.local`) only after
+`fail2ban-regex /var/log/nginx/agentwall_access.log /etc/fail2ban/filter.d/agentwall-behavior.conf`
+shows no shared/CGNAT or office IPs among the would-be offenders (see §7 for
+their privilege caveat). Verify rollback (§4) before you need it.
 
 ### Phase 4 — automate response
 
@@ -410,8 +421,15 @@ degrades to "rate-limit + WAF + fail2ban only".
       HTTPS-only verified.
 - [ ] fail2ban (if used) runs least-privileged; `agentwall-ml` jail exists; the
       NNP-vs-sudo decision is recorded.
-- [ ] `AGENTWALL_HEADLESS_MODE=mark` observed during shadow; switch to `block` for
-      phase 3 and confirm `agentwall_headless_total` + `AgentWallHeadlessDetected` behave.
+- [ ] `AGENTWALL_HEADLESS_MODE=mark` observed during shadow (edge + scorer); switch
+      both to `block` for phase 3 and confirm `agentwall_headless_total` +
+      `AgentWallHeadlessDetected` behave.
+- [ ] Scorer can read the access log after a rotation (`0640 root adm`):
+      systemd `SupplementaryGroups=adm`, compose `group_add` (`AGENTWALL_LOG_GID`).
+- [ ] `set_real_ip_from` lists only your LB/CDN addresses (never broad private
+      ranges when nginx runs in Docker with published ports).
+- [ ] `$agentwall_edge_enforce` and the fail2ban behavioural jails switched on only
+      after their shadow review.
 - [ ] Prometheus scraping the scorer (`deploy/prometheus/scrape.example.yml`) and
       the 23 rules loaded (`agentwall.rules.yml`) with alert routing tested.
 - [ ] Rollback tested: dropping `--enforce` / deleting `agentwall:block:*` restores

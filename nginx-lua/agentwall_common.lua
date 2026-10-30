@@ -53,6 +53,9 @@ M.HEADLESS_TTL_MAX         = 86400 * 7
 M.DEFAULT_HEADLESS_BLOCK   = 0.60
 M.DEFAULT_HEADLESS_SUSPECT = 0.35
 M.DEFAULT_MIN_SOLVE_MS     = 250
+M.GET_FALLBACK_AUTO        = "auto"   -- on in mark mode, off in block mode
+M.GET_FALLBACK_ON          = "on"
+M.GET_FALLBACK_OFF         = "off"
 M.DEFAULT_REDIS_HOST       = "127.0.0.1"
 M.DEFAULT_REDIS_PORT       = 6379
 M.DEFAULT_REDIS_DB         = 0
@@ -465,7 +468,10 @@ end
 local AUTOMATION_UA_MARKERS = {
     -- generic headless/browser-automation markers
     "headlesschrome",
-    "electron/",
+    -- NOTE: "electron/" is intentionally NOT listed: Slack/Teams/Discord/VS Code
+    -- and many in-house desktop apps embed sites in Electron, so it is a
+    -- high-false-positive marker. Electron-driven automation still trips the
+    -- webdriver/CDP and browser-surface checks in headless_score.
     "phantomjs",
     "slimerjs",
     "playwright",
@@ -515,11 +521,28 @@ function M.is_automation_ua(ua)
     return false
 end
 
+-- Only genuine SOFTWARE rasterizers. "ANGLE" is NOT one: real Chrome/Edge on
+-- Windows and macOS (and Android Chrome on many devices) report
+-- "ANGLE (<GPU vendor>, <GPU>, ...)" for hardware GPUs, and "Mesa" is the
+-- normal open-source Linux driver stack for Intel/AMD GPUs ("Mesa Intel(R)
+-- UHD Graphics"). Matching either flagged almost every real browser.
+-- Phones, tablets and Android WebView. iPadOS Safari sends a desktop macOS UA
+-- (no "Mobile"), but it is neither Chrome nor Firefox, so the desktop-only
+-- surface checks never apply to it anyway.
+function M.is_mobile_ua(ua)
+    if type(ua) ~= "string" or ua == "" then return false end
+    local lower = ua:lower()
+    if lower:find("android", 1, true) then return true end
+    if lower:find("iphone", 1, true) or lower:find("ipad", 1, true) then return true end
+    if lower:find("mobile", 1, true) then return true end
+    if lower:find("; wv)", 1, true) then return true end
+    return false
+end
+
 local SOFTWARE_GL_MARKERS = {
     "swiftshader",
     "llvmpipe",
-    "mesa",
-    "angle",
+    "softpipe",
     "microsoft basic render",
     "swangle",
 }
@@ -597,6 +620,11 @@ function M.headless_score(report, opts)
     local is_chrome_ua = ua_lower:find("chrome/", 1, true) ~= nil
     local is_firefox_ua = ua_lower:find("firefox/", 1, true) ~= nil
     local is_headless_ua = ua_lower:find("headlesschrome", 1, true) ~= nil
+    -- Mobile browsers and Android WebView (in-app browsers: Instagram,
+    -- Facebook, TikTok, LINE, ...) legitimately expose NO plugins/MIME types,
+    -- NO PDF viewer and (WebView) NO window.chrome. Those surfaces are only a
+    -- headless tell on desktop builds, so they are not scored for mobile UAs.
+    local is_mobile_ua = M.is_mobile_ua(ua)
 
     -- Direct automation markers.
     if report_bool(r, "webdriver") then score = score + 0.50 end
@@ -610,13 +638,14 @@ function M.headless_score(report, opts)
         score = score + 0.40
     end
 
-    -- Browser surface consistency.
+    -- Browser surface consistency (desktop only, see is_mobile_ua above).
     local plugins = report_num(r, "plugins") or 0
     local mime_types = report_num(r, "mimeTypes") or 0
-    if plugins == 0 and mime_types == 0 and (is_chrome_ua or is_firefox_ua) then
+    local empty_plugins = (plugins == 0 and mime_types == 0)
+    if empty_plugins and (is_chrome_ua or is_firefox_ua) and not is_mobile_ua then
         score = score + 0.20
     end
-    if report_bool(r, "chrome") == false and is_chrome_ua then
+    if r["chrome"] ~= true and is_chrome_ua and not is_mobile_ua then
         score = score + 0.25
     end
     local software_gl = looks_like_software_gl(
@@ -627,13 +656,15 @@ function M.headless_score(report, opts)
     -- Correlated headless surfaces: empty plugin/MIME surface + software
     -- rasterizer is the default-headless-Chromium shape (Playwright/Puppeteer,
     -- and Strix's agent-browser inside a container). Either signal alone is
-    -- weak; together they are a strong automation signal.
-    if plugins == 0 and mime_types == 0 and software_gl then
+    -- weak; together they are a strong automation signal. A real phone never
+    -- renders WebGL with SwiftShader/llvmpipe, so this one applies to mobile
+    -- UAs too (a desktop headless browser spoofing a phone UA).
+    if empty_plugins and software_gl then
         score = score + 0.25
     end
     -- Disabled/absent PDF viewer combined with an empty plugin surface is
-    -- another headless build tell.
-    if r["pdfViewer"] == false and plugins == 0 then
+    -- another headless build tell (desktop only).
+    if r["pdfViewer"] == false and plugins == 0 and not is_mobile_ua then
         score = score + 0.15
     end
 
@@ -647,7 +678,8 @@ function M.headless_score(report, opts)
     local screen_w = report_num(r, "screenW")
     if (outer_w ~= nil and outer_w == 0)
         or (outer_h ~= nil and outer_h == 0)
-        or (outer_w ~= nil and screen_w ~= nil and screen_w > 0 and outer_w > screen_w) then
+        or (not is_mobile_ua and outer_w ~= nil and screen_w ~= nil
+            and screen_w > 0 and outer_w > screen_w) then
         score = score + 0.20
     end
     if screen_w ~= nil and screen_w == 0 then
@@ -759,8 +791,23 @@ function M.load_challenge_config()
     if mode ~= M.HEADLESS_MODE_BLOCK then
         mode = M.HEADLESS_MODE_MARK          -- unknown/misspelled -> safe shadow
     end
+    -- The report-less GET fallback (?agentwall_id=&agentwall_pow=) verifies the
+    -- PoW only, so in block mode it would let any non-browser client skip the
+    -- headless check. "auto" therefore disables it in block mode.
+    local get_fallback = M.env_str("AGENTWALL_GET_FALLBACK", M.GET_FALLBACK_AUTO):lower()
+    if get_fallback ~= M.GET_FALLBACK_ON and get_fallback ~= M.GET_FALLBACK_OFF then
+        get_fallback = M.GET_FALLBACK_AUTO
+    end
+    if get_fallback == M.GET_FALLBACK_AUTO then
+        if mode == M.HEADLESS_MODE_BLOCK then
+            get_fallback = M.GET_FALLBACK_OFF
+        else
+            get_fallback = M.GET_FALLBACK_ON
+        end
+    end
     return {
         secret    = M.env_str("AGENTWALL_CHAL_SECRET", nil),
+        get_fallback = (get_fallback == M.GET_FALLBACK_ON),
         pow_diff  = M.env_int("AGENTWALL_POW_DIFF", M.DEFAULT_POW_DIFF,
                               M.POW_DIFF_MIN, M.POW_DIFF_MAX, true),
         chal_ttl  = M.env_int("AGENTWALL_CHAL_TTL", M.DEFAULT_CHAL_TTL, 1, 86400 * 30, false),

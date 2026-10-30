@@ -186,7 +186,8 @@ write_secret_file() { # write_secret_file <path> <content>
 }
 
 compose_content="REDIS_PASS=${REDIS_PASS}"
-agentwall_scorer_content="REDIS_URL=redis://:${REDIS_PASS}@${url_host}:${REDIS_PORT}/${REDIS_DB}"
+agentwall_scorer_content="REDIS_URL=redis://:${REDIS_PASS}@${url_host}:${REDIS_PORT}/${REDIS_DB}
+AGENTWALL_HEADLESS_MODE=mark"
 nginx_content="AGENTWALL_REDIS_PASS=${REDIS_PASS}
 AGENTWALL_CHAL_SECRET=${CHAL_SECRET}
 AGENTWALL_POW_DIFF=4
@@ -197,7 +198,8 @@ AGENTWALL_HEADLESS_MODE=mark
 AGENTWALL_HEADLESS_TTL=3600
 AGENTWALL_HEADLESS_BLOCK=0.60
 AGENTWALL_HEADLESS_SUSPECT=0.35
-AGENTWALL_MIN_SOLVE_MS=250"
+AGENTWALL_MIN_SOLVE_MS=250
+AGENTWALL_GET_FALLBACK=auto"
 
 write_secret_file "$OUT/compose.env" "$compose_content"
 write_secret_file "$OUT/agentwall-scorer.env" "$agentwall_scorer_content"
@@ -236,7 +238,8 @@ say "   Then forward the values to the workers from the *main* context of nginx.
 say "   ('env NAME;' without a value inherits it from the process environment, which"
 say "   the EnvironmentFile above provides):"
 for v in AGENTWALL_REDIS_PASS AGENTWALL_CHAL_SECRET AGENTWALL_POW_DIFF AGENTWALL_CHAL_TTL AGENTWALL_CLR_TTL AGENTWALL_IPV6_PREFIX \
-         AGENTWALL_HEADLESS_MODE AGENTWALL_HEADLESS_TTL AGENTWALL_HEADLESS_BLOCK AGENTWALL_HEADLESS_SUSPECT AGENTWALL_MIN_SOLVE_MS; do
+         AGENTWALL_HEADLESS_MODE AGENTWALL_HEADLESS_TTL AGENTWALL_HEADLESS_BLOCK AGENTWALL_HEADLESS_SUSPECT AGENTWALL_MIN_SOLVE_MS \
+         AGENTWALL_GET_FALLBACK; do
     say "     env $v;"
 done
 say ""
@@ -249,6 +252,10 @@ say "     env AGENTWALL_CHAL_SECRET=<paste AGENTWALL_CHAL_SECRET from nginx.env>
 say "     env AGENTWALL_POW_DIFF=4; env AGENTWALL_CHAL_TTL=600; env AGENTWALL_CLR_TTL=600;"
 say "     env AGENTWALL_IPV6_PREFIX=64;"
 say "     env AGENTWALL_HEADLESS_MODE=mark; env AGENTWALL_MIN_SOLVE_MS=250;   # mark -> block in phase 3"
+say "     env AGENTWALL_GET_FALLBACK=auto;"
+say ""
+say "   Keep the scorer's AGENTWALL_HEADLESS_MODE (agentwall-scorer.env / compose)"
+say "   equal to the edge's: switch BOTH from mark to block together."
 say ""
 say "   AGENTWALL_REDIS_HOST / AGENTWALL_REDIS_PORT / AGENTWALL_REDIS_DB are not secrets;"
 say "   set them wherever the Lua reads env (or inline in nginx.conf), e.g."
