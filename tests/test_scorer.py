@@ -17,10 +17,12 @@ T0 = 1_800_000_000.0
 
 
 def ev(ts=T0, status=200, path="/", is_auth=False, is_static=False, is_probe=False,
-       ua_flag=False, is_browser=True, is_tool=False, has_ref=True, xff=None, ip="203.0.113.7"):
+       ua_flag=False, is_browser=True, is_tool=False, has_ref=True, xff=None, ip="203.0.113.7",
+       is_oob=False):
     return {
         "ip": ip, "xff": xff, "ts": ts, "status": status, "path": path,
         "ua": "", "is_auth": is_auth, "is_static": is_static, "is_probe": is_probe,
+        "is_oob": is_oob,
         "ua_flag": ua_flag, "is_browser": is_browser, "is_tool": is_tool, "has_ref": has_ref,
     }
 
@@ -445,6 +447,46 @@ class BatchAndModelTests(unittest.TestCase):
     def test_once_flag_parses(self):
         args = s.build_argparser().parse_args(["--log", "x", "--once"])
         self.assertTrue(args.once)
+
+
+class OobDetectionTests(unittest.TestCase):
+    """OOB interaction callbacks are a hard, single-request attack signal."""
+
+    def line(self, path, ref="-"):
+        return ('203.0.113.9 - - [27/Oct/2026:20:46:24 +0700] "GET {} HTTP/1.1" '
+                '200 5 "{}" "Mozilla/5.0" rt=0.001 urt=0.001 ua_flag=0 probe=0 '
+                'xff="-"').format(path, ref)
+
+    def test_oob_in_query_sets_probe_and_oob(self):
+        for host in ("http://x.oast.fun/a", "y.burpcollaborator.net",
+                     "z.oastify.com", "sub.dnslog.cn", "p.ceye.io",
+                     "http://q.interact.sh/x"):
+            e = s.parse_line(self.line("/api/fetch?url=" + host))
+            self.assertTrue(e["is_oob"], host)
+            self.assertTrue(e["is_probe"], host)
+
+    def test_oob_in_referer(self):
+        e = s.parse_line(self.line("/", ref="http://x.oast.fun/cb"))
+        self.assertTrue(e["is_oob"])
+
+    def test_url_encoded_probe_still_detected(self):
+        e = s.parse_line(self.line("/x?u=%2E%2E%2Fetc%2Fpasswd"))
+        self.assertTrue(e["is_probe"])
+
+    def test_benign_traffic_is_not_oob(self):
+        for path in ("/search?q=weather", "/articles/union-contract-review",
+                     "/products?sort=price"):
+            e = s.parse_line(self.line(path))
+            self.assertFalse(e["is_oob"], path)
+            self.assertFalse(e["is_probe"], path)
+
+    def test_single_oob_event_is_a_hard_signal(self):
+        w = s.IPWindow()
+        for i in range(12):
+            w.add(ev(ts=T0 + i, status=200, path="/p%d" % i), 120)
+        w.add(ev(ts=T0 + 20, status=200, path="/fetch", is_oob=True, is_probe=True), 120)
+        _, _, hard = w.features()
+        self.assertTrue(hard)
 
 
 class AuthPathTests(unittest.TestCase):

@@ -505,6 +505,7 @@ local AUTOMATION_UA_MARKERS = {
     "wpscan",
     "masscan",
     "zgrab",
+    "cyberstrikeai",       -- CyberStrikeAI default WebShell/FOFA UA token
 }
 
 function M.is_automation_ua(ua)
@@ -822,6 +823,249 @@ function M.load_challenge_config()
         min_solve_ms = M.env_int("AGENTWALL_MIN_SOLVE_MS", M.DEFAULT_MIN_SOLVE_MS,
                                  0, 600000, false),
     }
+end
+
+-- Static-asset extensions (shared by the edge behavioural layer; mirrors the
+-- nginx static-asset map and the scorer's STATIC_EXT so 404s on stale bundles,
+-- favicons and source maps are not counted as enumeration).
+M.STATIC_EXT = {
+    css = true, js = true, mjs = true, map = true, png = true, jpg = true,
+    jpeg = true, gif = true, svg = true, ico = true, webp = true, avif = true,
+    woff = true, woff2 = true, ttf = true, otf = true, eot = true,
+    mp4 = true, webm = true,
+}
+
+function M.is_static_path(path)
+    if type(path) ~= "string" then return false end
+    local ext = path:match("%.([%w]+)$")
+    if not ext then return false end
+    return M.STATIC_EXT[ext:lower()] == true
+end
+
+-- Auth/identity path, anchored to a whole first path segment (matches the
+-- nginx location / Apache rule / scorer AUTH_RE: /auth and /auth/x match,
+-- /authors and /tokenomics do not).
+local AUTH_SEGMENTS = {
+    "login", "signin", "sign-in", "auth", "oauth", "token",
+    "verify", "otp", "mfa", "2fa",
+}
+function M.is_auth_path(path)
+    if type(path) ~= "string" or path == "" then return false end
+    local lower = path:lower()
+    for i = 1, #AUTH_SEGMENTS do
+        local seg = AUTH_SEGMENTS[i]
+        local pos = lower:find(seg, 1, true)
+        while pos do
+            local before = (pos == 1) and "/" or lower:sub(pos - 1, pos - 1)
+            local after_i = pos + #seg
+            local after = (after_i > #lower) and "" or lower:sub(after_i, after_i)
+            if before == "/"
+                and (after == "" or after == "/" or after == "." or after == "?"
+                     or after == ";") then
+                return true
+            end
+            pos = lower:find(seg, pos + 1, true)
+        end
+    end
+    -- password/reset and password/forgot
+    if lower:find("/password/reset", 1, true) or lower:find("/password/forgot", 1, true) then
+        return true
+    end
+    return false
+end
+
+-- Split a comma/space separated env list into a trimmed, lowercased array.
+function M.env_list(name)
+    local raw = M.env_str(name, nil)
+    local out = {}
+    if not raw then return out end
+    for item in raw:gmatch("[^,%s]+") do
+        out[#out + 1] = item:lower()
+    end
+    return out
+end
+
+M.BEHAVIOR_MODE_OFF       = "off"
+M.BEHAVIOR_MODE_MARK      = "mark"
+M.BEHAVIOR_MODE_CHALLENGE = "challenge"
+M.DEFAULT_BEHAVIOR_MODE   = "mark"      -- shadow by default: count + log, no action
+M.DEFAULT_BEHAVIOR_WINDOW = 60          -- seconds
+
+-- Edge behavioural layer (agentwall_behavior_log.lua). Shipped in `mark` mode:
+-- it tallies per-key signals and logs would-be actions, but writes no verdict.
+function M.load_behavior_config()
+    local mode = M.env_str("AGENTWALL_BEHAVIOR_MODE", M.DEFAULT_BEHAVIOR_MODE):lower()
+    if mode ~= M.BEHAVIOR_MODE_OFF and mode ~= M.BEHAVIOR_MODE_CHALLENGE then
+        mode = M.BEHAVIOR_MODE_MARK
+    end
+    return {
+        mode          = mode,
+        window        = M.env_int("AGENTWALL_BEHAVIOR_WINDOW", M.DEFAULT_BEHAVIOR_WINDOW,
+                                  5, 3600, true),
+        probe_block   = M.env_int("AGENTWALL_BEHAVIOR_PROBE_BLOCK", 2, 1, 1000, true),
+        oob_block     = M.env_int("AGENTWALL_BEHAVIOR_OOB_BLOCK", 1, 1, 1000, true),
+        err_challenge = M.env_int("AGENTWALL_BEHAVIOR_ERR_CHALLENGE", 20, 2, 100000, true),
+        auth_challenge = M.env_int("AGENTWALL_BEHAVIOR_AUTH_CHALLENGE", 6, 2, 100000, true),
+        header_suspect = M.env_float("AGENTWALL_BEHAVIOR_HEADER_SUSPECT", 0.60, 0, 1, true),
+        challenge_ttl = M.env_int("AGENTWALL_CHAL_TTL", M.DEFAULT_CHAL_TTL, 1, 86400 * 30, false),
+        block_ttl     = M.env_int("AGENTWALL_BEHAVIOR_BLOCK_TTL", 1800, 1, 86400 * 30, false),
+        oob_extra     = M.env_list("AGENTWALL_OOB_EXTRA"),
+    }
+end
+
+-- =============================================================================
+-- Out-of-band (OOB) interaction callback hosts
+-- =============================================================================
+-- Blind SSRF/RCE/XXE/SQLi verification by autonomous agents and scanners almost
+-- always calls back to a collaborator/interaction host. These substrings appear
+-- in a request URI, a query value, a header (Referer, X-Forwarded-For spoof),
+-- or a reflected body. They are vanishingly rare in legitimate traffic, so an
+-- exact substring hit is a strong attack signal (not a UA, cannot be rotated as
+-- cheaply). The operator can extend this via AGENTWALL_OOB_EXTRA (comma list).
+M.OOB_MARKERS = {
+    "interact.sh",          -- interactsh default
+    "oast.fun", "oast.site", "oast.live", "oast.online", "oast.pro", "oast.me",
+    "burpcollaborator.net", -- Burp Collaborator default
+    "oastify.com",          -- Burp Collaborator (newer)
+    "dnslog.cn",            -- dnslog.cn
+    "ceye.io",              -- ceye.io
+    ".canarytokens.com", "canarytokens.org",
+    "requestrepo.com", "requestbin.net",
+    "pipedream.net",
+    "webhook.site",
+    "dnslog.pw", "dnslog.store",
+    "eyes.sh",
+    "interactsh",           -- the literal tool name in a path/param
+}
+
+-- Coarse injection/traversal probe markers (Lua patterns, case-insensitive via
+-- a pre-lowercased copy). Mirrors the nginx $agentwall_probe map so the edge
+-- behavioural layer does not depend on that nginx variable being defined.
+M.PROBE_PATTERNS = {
+    "%.%./",                 -- path traversal
+    "union[%s/*]+select",    -- SQLi UNION
+    "<script",               -- reflected XSS
+    "/etc/passwd",           -- LFI
+    "%.%./%.%./",            -- deeper traversal
+    "or%s+1=1",              -- SQLi tautology
+}
+function M.is_probe_payload(s)
+    if type(s) ~= "string" or s == "" then return false end
+    local lower = s:lower()
+    for i = 1, #M.PROBE_PATTERNS do
+        if lower:find(M.PROBE_PATTERNS[i]) then return true end
+    end
+    return false
+end
+
+-- Returns true if `s` (lowercased internally) contains any OOB marker, plus the
+-- marker matched. `extra` is an optional array of additional substrings.
+function M.is_oob_callback(s, extra)
+    if type(s) ~= "string" or s == "" then return false end
+    local lower = s:lower()
+    for i = 1, #M.OOB_MARKERS do
+        if lower:find(M.OOB_MARKERS[i], 1, true) then
+            return true, M.OOB_MARKERS[i]
+        end
+    end
+    if type(extra) == "table" then
+        for i = 1, #extra do
+            local m = extra[i]
+            if type(m) == "string" and m ~= "" and lower:find(m:lower(), 1, true) then
+                return true, m
+            end
+        end
+    end
+    return false
+end
+
+-- =============================================================================
+-- Browser-header consistency (cheap, server-side, per request)
+-- =============================================================================
+-- A real Chrome/Firefox/Edge over HTTPS always sends Fetch Metadata request
+-- headers (Sec-Fetch-*) and an Accept-Language. HTTP client libraries and most
+-- scanner/agent HTTP stacks that merely set a browser User-Agent do NOT. This
+-- returns a score in [0,1] and a reason; it is deliberately conservative
+-- (HTTPS top-level navigations only) to avoid flagging legacy browsers, native
+-- apps, and non-browser UAs that never claimed to be a browser.
+--   headers = { user_agent=, sec_fetch_mode=, sec_fetch_site=, sec_fetch_dest=,
+--               accept_language=, accept=, sec_ch_ua=, scheme= }
+function M.browser_header_inconsistency(headers)
+    headers = headers or {}
+    local ua = headers.user_agent
+    if type(ua) ~= "string" or ua == "" then return 0, nil end
+    if (headers.scheme or "") ~= "https" then return 0, nil end
+    local ua_lower = ua:lower()
+    -- Only score UAs that explicitly claim a modern engine. Everything else
+    -- (curl, libraries, bots, old browsers) is handled by other layers.
+    local claims_chromium = ua_lower:find("chrome/", 1, true)
+        or ua_lower:find(" edg/", 1, true)
+    local claims_firefox = ua_lower:find("firefox/", 1, true)
+    if not claims_chromium and not claims_firefox then return 0, nil end
+    -- Headless/automation UA is scored elsewhere; don't double count here.
+    if M.is_automation_ua(ua) then return 0, nil end
+
+    local score = 0
+    local reasons = {}
+    -- Chromium >= 76 and Firefox >= 90 always emit Sec-Fetch-Mode on navigation.
+    if (headers.sec_fetch_mode == nil or headers.sec_fetch_mode == "")
+        and (headers.sec_fetch_site == nil or headers.sec_fetch_site == "") then
+        score = score + 0.45
+        reasons[#reasons + 1] = "no-sec-fetch"
+    end
+    -- Real browsers send Accept-Language on top-level navigations.
+    if headers.accept_language == nil or headers.accept_language == "" then
+        score = score + 0.25
+        reasons[#reasons + 1] = "no-accept-language"
+    end
+    -- A modern browser always sends a non-trivial Accept on navigation; a bare
+    -- "*/*" (the curl/requests default) with a browser UA is inconsistent.
+    local accept = headers.accept
+    if accept == nil or accept == "" or accept == "*/*" then
+        score = score + 0.20
+        reasons[#reasons + 1] = "trivial-accept"
+    end
+    -- Chromium exposes Sec-CH-UA on HTTPS; its absence with a Chrome UA is odd.
+    if claims_chromium
+        and (headers.sec_ch_ua == nil or headers.sec_ch_ua == "") then
+        score = score + 0.15
+        reasons[#reasons + 1] = "no-client-hints"
+    end
+    if score > 1 then score = 1 end
+    return score, (reasons[1] and table.concat(reasons, ",") or nil)
+end
+
+-- =============================================================================
+-- Behavioural edge challenge decision (pure; the Lua log phase keeps the state)
+-- =============================================================================
+-- The Python scorer is the rich behavioural brain, but it is out-of-band and
+-- only acts after --warmup events. This gives the EDGE a cheap, immediate,
+-- stateful signal with no model: too many 4xx (enumeration/credential-stuffing)
+-- or too many probe/OOB hits from one key inside a short window -> challenge.
+-- `counts` is the current window tally for a key; thresholds come from config.
+-- Returns "challenge", "block", or nil. Pure so it is unit-tested directly.
+function M.behavior_decision(counts, cfg)
+    counts = counts or {}
+    cfg = cfg or {}
+    local probe = tonumber(counts.probe) or 0
+    local oob = tonumber(counts.oob) or 0
+    local errors = tonumber(counts.errors) or 0
+    local auth_fail = tonumber(counts.auth_fail) or 0
+
+    local probe_block = tonumber(cfg.probe_block) or 2
+    local oob_block = tonumber(cfg.oob_block) or 1
+    local err_challenge = tonumber(cfg.err_challenge) or 20
+    local auth_challenge = tonumber(cfg.auth_challenge) or 6
+
+    -- Hard, high-confidence signals go straight to block: a probe/OOB payload
+    -- is not something a human browser emits. Keep the thresholds >= 1.
+    if oob >= oob_block then return "block", "oob-callback" end
+    if probe >= probe_block then return "block", "probe-burst" end
+    -- Enumeration / credential stuffing: challenge (a human solves it once,
+    -- a headless/script loop cannot, and the burst stops).
+    if auth_fail >= auth_challenge then return "challenge", "auth-burst" end
+    if errors >= err_challenge then return "challenge", "error-burst" end
+    return nil
 end
 
 -- =============================================================================

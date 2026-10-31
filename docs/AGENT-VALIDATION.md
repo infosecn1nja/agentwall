@@ -13,6 +13,15 @@ AgentWall controls, and what remains out of scope.
 |-------|--------|------------------------|
 | **Strix** | <https://github.com/usestrix/strix> (Apache-2.0) | sandbox browser flags/UA, scanner toolchain defaults |
 | **ARTEX** | <https://github.com/jiwoochris/artex-global> (AGPL-3.0; detection/defense guide only) | enrichment/WebFetch/self-update UAs, tool-default attack traffic |
+| **CyberStrikeAI** | <https://github.com/aipentest/cyberstrikeai> | default WebShell/FOFA User-Agents, Kali-tool defaults, OOB (dnslog) verification |
+
+> **Behaviour over signatures.** The UA/tool lists below are a cheap first cut
+> that any operator can rotate away. The durable controls against all three
+> agents are the **edge behavioural layer** (`nginx-lua/agentwall_behavior_log.lua`:
+> OOB-callback → block, probe/4xx-enumeration/credential-stuffing bursts →
+> block/challenge, scripted-client header inconsistency) and the out-of-band
+> scorer. Those act on the *pattern*, not the name, and are what the e2e
+> `G1–G6` assertions exercise.
 
 No upstream code or rule files are copied into this MIT project. Only public
 observable facts (UA strings, launch flags, documented tool names) are used to
@@ -69,6 +78,30 @@ ARTEX's own detection material also states the durable signal is **behaviour**,
 not the UA. AgentWall follows the same principle: the UA lists are a cheap first
 cut, and the scorer/fail2ban layer is what catches rotated tooling.
 
+## CyberStrikeAI
+
+From the repository source (`internal/handler/webshell.go`,
+`internal/handler/fofa.go`, `tools/*.yaml`):
+
+- WebShell interaction GET/POSTs default to **`Mozilla/5.0 (compatible;
+  CyberStrikeAI-WebShell/1.0)`**; the FOFA search client sends
+  **`CyberStrikeAI/1.7.4`**. Both carry the `cyberstrikeai` token.
+- Attack traffic otherwise runs the **real tools' defaults** (nuclei, sqlmap,
+  ffuf, katana, dirsearch, nmap, masscan, gobuster, wafw00f, hydra, …) — the
+  same defaults already covered for Strix/ARTEX.
+- Blind-vuln verification uses an OOB **dnslog** helper (`tools/dnslog.yaml`,
+  `dnslog.cn`), the canonical interaction-callback pattern.
+
+How AgentWall sees that:
+
+| CyberStrikeAI behaviour | AgentWall control | Test |
+|-------------------------|-------------------|------|
+| `CyberStrikeAI-WebShell/1.0` / `CyberStrikeAI/1.7.4` UAs | `cyberstrikeai` UA marker: immediate 403 (block mode) + scorer hard signal + WAF map | `F23–F24`, Lua `is_automation_ua` |
+| dnslog / OOB callback in a request it induces the target to make | `is_oob_callback` → edge behavioural **block**; scorer `OOB_RE` hard signal | `G1–G2` |
+| nuclei/sqlmap/ffuf/katana/… defaults | UA markers + behavioural scoring | `F4–F22` |
+| Enumeration → probe → persistence past 4xx | Edge 4xx-burst challenge; scorer `multistage` hard signal; fail2ban | `G3–G5`, `D1–D11` |
+| WebShell/C2 beaconing on a fixed interval | Out of HTTP scope here — detect at the host/EDR and egress layer | documented limit |
+
 ## Shipped test evidence
 
 `tests/e2e-real/run.sh` contains the source-derived profiles and asserts:
@@ -81,11 +114,13 @@ F0  normal browser UA allowed                                    PASS
 F0b python-httpx library allowed (false-positive control)        PASS
 F0c ordinary curl UA allowed (false-positive control)            PASS
 F1–F22  ARTEX + Strix scanner/agent default UAs blocked (403)    PASS
-RESULT: PASS=64 FAIL=0
+F23–F24  CyberStrikeAI WebShell/FOFA UAs blocked (403)            PASS
+G1–G6  edge behavioural prevention (OOB/probe/4xx/auth/header)    PASS
+RESULT: PASS=72 FAIL=0
 ```
 
 The same stack is also exercised against real Redis + OpenResty + the real
-scorer (rivver model), including block/challenge/clearance and IPv6 `/64`.
+scorer (river model), including block/challenge/clearance and IPv6 `/64`.
 
 ## What this does **not** prove
 

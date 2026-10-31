@@ -6,6 +6,39 @@ All notable changes to AgentWall are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — edge behavioural prevention (inline, model-free)
+
+- **New `nginx-lua/agentwall_behavior_log.lua`** (wired via `log_by_lua_file`):
+  the edge now acts on an autonomous agent's *behaviour* within one short
+  window, without waiting for the out-of-band scorer and without relying on the
+  User-Agent. Per-key fixed-window Redis counters drive:
+  - **out-of-band interaction callbacks** (interactsh / `oast.*` / Burp
+    Collaborator / `oastify.com` / `dnslog.cn` / `ceye.io` / canarytokens / …,
+    extensible via `AGENTWALL_OOB_EXTRA`) in the URI, query or Referer → block;
+  - **injection/traversal probe payloads** → block on a short burst;
+  - **4xx enumeration bursts** and **credential-stuffing bursts** on auth paths
+    → JS challenge (a human solves it once; a script loop cannot);
+  - **browser-header inconsistency** (a modern-Chrome/Firefox UA over HTTPS with
+    no `Sec-Fetch-*` / `Accept-Language` / client hints — the scripted-client
+    tell) counted as a soft signal.
+  The log phase cannot open sockets, so Redis work is handed to a detached
+  `ngx.timer.at(0,…)`; the layer adds no response latency and fails open. It
+  writes the same `agentwall:block` / `agentwall:challenge` keys the scorer
+  writes, so the access-phase script enforces them on the next request.
+  **Ships in shadow** (`AGENTWALL_BEHAVIOR_MODE=mark`): it logs the would-be
+  verdict and writes nothing until an operator sets `challenge`.
+- **Out-of-band callback signatures in every layer**: `OOB_RE` in the scorer
+  (a single OOB hit is now a hard signal), the `$agentwall_probe` nginx map, and
+  `agentwall_common.is_oob_callback` in Lua.
+- Pure, unit-tested helpers in `agentwall_common`: `is_oob_callback`,
+  `is_probe_payload`, `is_static_path`, `is_auth_path`,
+  `browser_header_inconsistency`, `behavior_decision`, `load_behavior_config`.
+- Validation extended: 10 new config knobs (`AGENTWALL_BEHAVIOR_*`,
+  `AGENTWALL_OOB_EXTRA`) in `gen-secrets.sh` / `nginx.conf.example` / the e2e
+  harness; 6 new real end-to-end assertions (`G1–G6`) covering OOB block, probe
+  block, 4xx-burst challenge, and a normal-browser false-positive guard;
+  CyberStrikeAI default UAs added to the agent-validation profiles.
+
 ### Production hardening (false positives and safe defaults)
 
 - **Self-inflicted fail2ban bans (critical):** the general per-IP limiter
@@ -147,7 +180,7 @@ fail2ban jails, a streaming ML scorer, and an OpenResty verification layer.
   Redis contract).
 - Test suites at release: 70 Python unit/config tests, 206 Lua assertions, and
   a real Docker end-to-end test (Redis + OpenResty + real scorer, 36 assertions).
-  Unreleased adds the source-derived Strix/ARTEX profiles (64 assertions).
+  Unreleased adds the source-derived Strix/ARTEX/CyberStrikeAI profiles (72 assertions).
 - GitHub-ready docs: architecture, threat model, contributing, security policy,
   code of conduct, issue/PR templates, CI workflow, Makefile.
 

@@ -48,6 +48,15 @@ env AGENTWALL_HEADLESS_BLOCK;
 env AGENTWALL_HEADLESS_SUSPECT;
 env AGENTWALL_MIN_SOLVE_MS;
 env AGENTWALL_GET_FALLBACK;
+env AGENTWALL_BEHAVIOR_MODE;
+env AGENTWALL_BEHAVIOR_WINDOW;
+env AGENTWALL_BEHAVIOR_PROBE_BLOCK;
+env AGENTWALL_BEHAVIOR_OOB_BLOCK;
+env AGENTWALL_BEHAVIOR_ERR_CHALLENGE;
+env AGENTWALL_BEHAVIOR_AUTH_CHALLENGE;
+env AGENTWALL_BEHAVIOR_HEADER_SUSPECT;
+env AGENTWALL_BEHAVIOR_BLOCK_TTL;
+env AGENTWALL_OOB_EXTRA;
 
 worker_processes auto;
 worker_rlimit_nofile 65535;
@@ -148,6 +157,7 @@ http {
         "~*wpscan"                1;
         "~*masscan"               1;
         "~*zgrab"                 1;
+        "~*cyberstrikeai"         1;
         "~*^httpx/"               1;
     }
 
@@ -162,6 +172,16 @@ http {
         "~*<script"               1;
         "~*;\s*drop\s+table"      1;
         "~*/etc/passwd"           1;
+        # Out-of-band interaction callback hosts (blind SSRF/RCE/XXE/SQLi
+        # verification beacons). The Lua behavioural layer also checks the
+        # Referer and the operator's AGENTWALL_OOB_EXTRA list.
+        "~*\.oast\.(fun|site|live|online|pro|me)" 1;
+        "~*interact\.sh"          1;
+        "~*burpcollaborator\.net" 1;
+        "~*oastify\.com"          1;
+        "~*dnslog\.(cn|pw|store)" 1;
+        "~*ceye\.io"              1;
+        "~*interactsh"            1;
     }
 
     # --- edge hard-deny switch (shadow by default) ---------------------------
@@ -245,6 +265,15 @@ http {
         # NOTE: locations that finish in the rewrite phase (`return ...`) never
         # reach this script — serve protected content through proxy_pass/root.
         access_by_lua_file /etc/nginx/lua/agentwall_challenge_block.lua;
+
+        # Edge behavioural prevention (log phase, after the response). Tallies
+        # per-IP probe/OOB/4xx/auth-fail bursts and header-inconsistent scripted
+        # clients, then (in `challenge` mode) writes the same verdict keys the
+        # access script above enforces on the NEXT request. Ships in `mark`
+        # (shadow) mode: AGENTWALL_BEHAVIOR_MODE=mark logs would-be verdicts and
+        # writes nothing. It adds no latency (runs after the response is sent)
+        # and fails open on any Redis hiccup.
+        log_by_lua_file /etc/nginx/lua/agentwall_behavior_log.lua;
 
         # --- authentication / identity endpoints: tight throttle -------------
         # Whole first path segment only: /auth, /auth/callback, /login.php match;

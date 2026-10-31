@@ -17,6 +17,12 @@ AgentWall is a complete, self-hostable defense stack that raises cost and gives
 you the signal to respond:
 
 - **Edge WAF + rate/connection limits** with a structured access log
+- **Edge behavioural prevention (inline, no model)** — a log-phase Lua layer
+  acts on an agent's *pattern* within one short window, independent of the
+  out-of-band scorer: out-of-band interaction callbacks (interactsh / `oast.*` /
+  Burp Collaborator / dnslog / ceye) and probe payloads → block; 4xx
+  enumeration and credential-stuffing bursts → challenge; a browser UA with no
+  Fetch-Metadata/`Accept-Language` (scripted client) → scored. Ships in shadow.
 - **Behavioural fail2ban jails** (enumeration bursts, credential stuffing, persistence)
 - **Streaming unsupervised ML scorer — HalfSpaceTrees** (Half-Space Trees via
   [`river`](https://riverml.xyz/), `river~=0.21.0`) over per-key rolling
@@ -26,9 +32,9 @@ you the signal to respond:
   (webdriver, CDP, correlated plugin/WebGL/PDF surfaces, Client-Hints consistency,
   timing) and signed IP-bound clearances
 - **Source-derived validation against real agents**: Strix's default sandbox
-  browser and Kali toolchain, and ARTEX's enrichment/WebFetch/scanner defaults,
-  are blocked in the shipped end-to-end test (see
-  [docs/AGENT-VALIDATION.md](docs/AGENT-VALIDATION.md))
+  browser and Kali toolchain, ARTEX's enrichment/WebFetch/scanner defaults, and
+  CyberStrikeAI's default WebShell/FOFA User-Agents are blocked in the shipped
+  end-to-end test (see [docs/AGENT-VALIDATION.md](docs/AGENT-VALIDATION.md))
 - **Prometheus metrics + 23 alert rules**, dry-run defaults, staged rollout, instant rollback
 - **Tests you can trust**: unit/config suites, a real Docker end-to-end
   (Redis + OpenResty + real scorer), and Linux-native config validation
@@ -76,7 +82,7 @@ A scorer crash or Redis outage degrades to "no new verdicts", never downtime.
 | [`waf/`](waf/) | rate/conn limits, marker maps, automation-UA tagging, structured log | reverse proxy |
 | [`fail2ban/`](fail2ban/) | behavioural + auth jails, manual-ban jail for the scorer | proxy host |
 | [`scorer/`](scorer/) | streaming anomaly scorer → graduated verdicts | worker service |
-| [`nginx-lua/`](nginx-lua/) | inline 403 + verified PoW + **headless detection** | OpenResty |
+| [`nginx-lua/`](nginx-lua/) | inline 403 + verified PoW + **headless detection** + **edge behavioural prevention** (OOB callbacks, probe/4xx bursts, header consistency) | OpenResty |
 | [`deploy/`](deploy/) | Docker Compose, systemd unit, secrets, logrotate, Prometheus rules, preflight/Linux validators | ops / CI |
 | [`tests/`](tests/) | unit, config-regression, Lua, and **real** end-to-end tests | CI |
 
@@ -102,8 +108,8 @@ Verify before traffic:
 ```bash
 ./deploy/preflight.sh --use-xff --backend redis   # log format, secrets, config regressions
 ./deploy/validate-linux.sh                        # systemd/fail2ban/Apache/OpenResty in Docker
-./tests/run-tests.sh                              # 99 Python tests + 238 Lua assertions
-./tests/e2e-real/run.sh                           # real 403/challenge/headless/agent profiles (64 assertions)
+./tests/run-tests.sh                              # 109 Python tests + 298 Lua assertions
+./tests/e2e-real/run.sh                           # real 403/challenge/headless/behaviour/agent profiles (70 assertions)
 ```
 
 Production-safe defaults: everything that can turn away a visitor starts in

@@ -420,6 +420,9 @@ for _, ua in ipairs(AUTOMATION_UAS) do
     truthy("automation UA: " .. ua:sub(1, 40), C.is_automation_ua(ua))
 end
 truthy("automation UA case-insensitive", C.is_automation_ua("HEADLESSCHROME/1.0"))
+truthy("CyberStrikeAI WebShell UA", C.is_automation_ua(
+    "Mozilla/5.0 (compatible; CyberStrikeAI-WebShell/1.0)"))
+truthy("CyberStrikeAI FOFA UA", C.is_automation_ua("CyberStrikeAI/1.7.4"))
 falsy("real Chrome UA is not automation",
       C.is_automation_ua("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"))
 falsy("real Firefox UA is not automation",
@@ -753,6 +756,137 @@ do
     cfg = C.load_challenge_config()
     eq("unknown mode falls back to mark", cfg.headless_mode, "mark")
     eq("headless ttl clamped high", cfg.headless_ttl, 86400 * 7)
+    os.getenv = real_getenv
+end
+
+-- =============================================================================
+-- OOB interaction callbacks
+-- =============================================================================
+section("is_oob_callback")
+truthy("interactsh oast.fun", (C.is_oob_callback("/x?u=http://abc.oast.fun/p")))
+truthy("burp collaborator", (C.is_oob_callback("http://y.burpcollaborator.net/")))
+truthy("oastify", (C.is_oob_callback("/a?c=z.oastify.com")))
+truthy("dnslog.cn", (C.is_oob_callback("/?q=sub.dnslog.cn")))
+truthy("ceye.io", (C.is_oob_callback("/?x=p.ceye.io")))
+truthy("literal interactsh in path", (C.is_oob_callback("/interactsh/poll")))
+falsy("normal url not oob", C.is_oob_callback("/search?q=weather+today"))
+falsy("empty not oob", C.is_oob_callback(""))
+falsy("nil not oob", C.is_oob_callback(nil))
+do
+    local hit, marker = C.is_oob_callback("/x?u=http://h.oast.live/1")
+    truthy("returns the matched marker", hit and marker == "oast.live", marker)
+    local eh = C.is_oob_callback("/x?u=http://evil.mycanary.example/1",
+                                 { "mycanary.example" })
+    truthy("operator extra list honoured", eh)
+end
+
+-- =============================================================================
+-- probe payloads (Lua, pattern-based)
+-- =============================================================================
+section("is_probe_payload")
+truthy("path traversal", C.is_probe_payload("/x?f=../../etc/passwd"))
+truthy("sqli union", C.is_probe_payload("id=1 UNION SELECT 1,2"))
+truthy("xss", C.is_probe_payload("/?q=<script>alert(1)</script>"))
+truthy("etc passwd", C.is_probe_payload("/a/etc/passwd"))
+falsy("benign", C.is_probe_payload("/articles/union-contract-review"))
+falsy("empty", C.is_probe_payload(""))
+
+-- =============================================================================
+-- static + auth path helpers (shared with the edge behavioural layer)
+-- =============================================================================
+section("is_static_path / is_auth_path")
+truthy("css static", C.is_static_path("/assets/app.css"))
+truthy("woff2 static", C.is_static_path("/f/x.woff2"))
+falsy("html not static", C.is_static_path("/index.html"))
+falsy("no ext not static", C.is_static_path("/admin"))
+truthy("auth /login", C.is_auth_path("/login"))
+truthy("auth nested /api/oauth/token", C.is_auth_path("/api/oauth/token"))
+truthy("auth /auth/callback", C.is_auth_path("/auth/callback"))
+truthy("auth /password/reset", C.is_auth_path("/password/reset"))
+falsy("auth /authors reject", C.is_auth_path("/authors/jane"))
+falsy("auth /tokenomics reject", C.is_auth_path("/tokenomics"))
+
+-- =============================================================================
+-- browser header consistency
+-- =============================================================================
+section("browser_header_inconsistency")
+do
+    local full = {
+        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " ..
+                     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        scheme = "https", sec_fetch_mode = "navigate", sec_fetch_site = "none",
+        accept_language = "en-US,en;q=0.9", accept = "text/html,*/*",
+        sec_ch_ua = '"Chromium";v="131"',
+    }
+    eq("complete browser scores 0", (C.browser_header_inconsistency(full)), 0)
+    local bare = { user_agent = full.user_agent, scheme = "https" }
+    truthy("chrome UA with no browser headers is high",
+           (C.browser_header_inconsistency(bare)) >= 0.6)
+    eq("curl UA not scored", (C.browser_header_inconsistency(
+        { user_agent = "curl/8.5.0", scheme = "https" })), 0)
+    eq("no UA not scored", (C.browser_header_inconsistency({ scheme = "https" })), 0)
+    eq("http (not https) not scored", (C.browser_header_inconsistency(
+        { user_agent = full.user_agent, scheme = "http" })), 0)
+    -- a Chrome UA on https missing only client hints is a weak (sub-block) signal
+    local only_ch = {
+        user_agent = full.user_agent, scheme = "https", sec_fetch_mode = "navigate",
+        accept_language = "en", accept = "text/html",
+    }
+    local s = C.browser_header_inconsistency(only_ch)
+    truthy("missing-only-client-hints is weak", s > 0 and s < 0.6, s)
+end
+
+-- =============================================================================
+-- behavioural edge decision
+-- =============================================================================
+section("behavior_decision")
+do
+    eq("oob -> block", (C.behavior_decision({ oob = 1 })), "block")
+    eq("2 probes -> block", (C.behavior_decision({ probe = 2 })), "block")
+    eq("1 probe -> nil", C.behavior_decision({ probe = 1 }), nil)
+    eq("6 auth-fail -> challenge", (C.behavior_decision({ auth_fail = 6 })), "challenge")
+    eq("5 auth-fail -> nil (default threshold 6)", C.behavior_decision({ auth_fail = 5 }), nil)
+    eq("20 errors -> challenge", (C.behavior_decision({ errors = 20 })), "challenge")
+    eq("19 errors -> nil", C.behavior_decision({ errors = 19 }), nil)
+    eq("empty -> nil", C.behavior_decision({}), nil)
+    eq("nil -> nil", C.behavior_decision(nil), nil)
+    -- custom thresholds
+    local cfg = { probe_block = 5, err_challenge = 3 }
+    eq("custom probe threshold not hit at 2", C.behavior_decision({ probe = 2 }, cfg), nil)
+    eq("custom err threshold hit at 3", (C.behavior_decision({ errors = 3 }, cfg)), "challenge")
+    -- precedence: oob/probe block beats error challenge
+    eq("block beats challenge", (C.behavior_decision({ oob = 1, errors = 99 })), "block")
+end
+
+section("load_behavior_config defaults and clamping")
+do
+    local real_getenv = os.getenv
+    os.getenv = function() return nil end
+    local cfg = C.load_behavior_config()
+    eq("default behavior mode is mark (shadow)", cfg.mode, "mark")
+    eq("default window", cfg.window, 60)
+    eq("default probe_block", cfg.probe_block, 2)
+    eq("default oob_block", cfg.oob_block, 1)
+    eq("default err_challenge", cfg.err_challenge, 20)
+    eq("default auth_challenge", cfg.auth_challenge, 6)
+
+    local values = {
+        AGENTWALL_BEHAVIOR_MODE = "CHALLENGE",
+        AGENTWALL_BEHAVIOR_WINDOW = "1",          -- below min 5 -> clamp
+        AGENTWALL_BEHAVIOR_PROBE_BLOCK = "0",     -- below min 1 -> clamp
+        AGENTWALL_OOB_EXTRA = "foo.example, bar.test",
+    }
+    os.getenv = function(name) return values[name] end
+    cfg = C.load_behavior_config()
+    eq("mode case-insensitive", cfg.mode, "challenge")
+    eq("window clamped to min", cfg.window, 5)
+    eq("probe_block clamped to min", cfg.probe_block, 1)
+    eq("oob_extra parsed count", #cfg.oob_extra, 2)
+    eq("oob_extra lowercased", cfg.oob_extra[1], "foo.example")
+    values.AGENTWALL_BEHAVIOR_MODE = "wat"
+    eq("unknown mode falls back to mark", C.load_behavior_config().mode, "mark")
+    values.AGENTWALL_BEHAVIOR_MODE = "off"
+    eq("off honoured", C.load_behavior_config().mode, "off")
     os.getenv = real_getenv
 end
 

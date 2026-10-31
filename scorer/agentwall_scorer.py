@@ -110,6 +110,17 @@ PROBE_RE = re.compile(
     r'(\.\./|union[\s/*]+select|<script|;\s*drop\s+table|/etc/passwd|\bor\s+1=1)',
     re.IGNORECASE,
 )
+# Out-of-band interaction callback hosts. Blind SSRF/RCE/XXE/SQLi verification
+# by autonomous agents/scanners calls back to a collaborator host; these
+# substrings are vanishingly rare in legitimate traffic. Mirrors
+# agentwall_common.OOB_MARKERS in the Lua layer. A hit is a hard probe signal.
+OOB_RE = re.compile(
+    r'(interact\.sh|\.oast\.(?:fun|site|live|online|pro|me)|burpcollaborator\.net|'
+    r'oastify\.com|dnslog\.(?:cn|pw|store)|ceye\.io|canarytokens\.(?:com|org)|'
+    r'requestrepo\.com|requestbin\.net|pipedream\.net|webhook\.site|eyes\.sh|'
+    r'interactsh)',
+    re.IGNORECASE,
+)
 # Real browsers (rough; spoofable, so weighted low and backed by static-asset signal)
 BROWSER_UA_RE = re.compile(r'Mozilla/\d.*(Chrome|Firefox|Safari|Edg|Gecko|Version)/', re.IGNORECASE)
 # Automation / scanner clients (strong non-human signal)
@@ -119,7 +130,7 @@ TOOL_UA_RE = re.compile(
     r'axios|node-fetch|\bbot\b|crawler|spider|'
     r'artex-enrich|artex-selfupdate|norma/|ffuf|fuzz faster u fool|'
     r'nmap scripting engine|dirsearch|wafw00f|arjun|katana|subfinder|naabu|'
-    r'gospider|interactsh)',
+    r'gospider|interactsh|cyberstrikeai)',
     re.IGNORECASE,
 )
 # Good bots that claim an identity we can verify via forward-confirmed reverse DNS
@@ -230,6 +241,10 @@ def parse_line(line, use_xff=False, trusted_proxies=None):
     ext = os.path.splitext(stem)[1].lower()
     ua = g["ua"] or ""
     ref = g["ref"] or ""
+    # OOB callback host anywhere in the path/query or the Referer: a blind-vuln
+    # verification beacon. Checked raw and URL-decoded, like the probe markers.
+    decoded = unquote_plus(path)
+    is_oob = bool(OOB_RE.search(path) or OOB_RE.search(decoded) or OOB_RE.search(ref))
     return {
         "ip": ip,
         "xff": xff,
@@ -241,10 +256,13 @@ def parse_line(line, use_xff=False, trusted_proxies=None):
         "is_static": ext in STATIC_EXT,
         # Probe markers are checked on the raw path AND on a decoded copy: the
         # reverse proxy maps cannot URL-decode, but the scorer can, so encoded
-        # traversal/SQLi/XSS probes still raise this signal.
+        # traversal/SQLi/XSS probes still raise this signal. An OOB callback
+        # host is treated as a probe too (hard signal).
         "is_probe": bool(PROBE_RE.search(path))
-        or bool(PROBE_RE.search(unquote_plus(path)))
-        or g.get("probe") == "1",
+        or bool(PROBE_RE.search(decoded))
+        or g.get("probe") == "1"
+        or is_oob,
+        "is_oob": is_oob,
         "ua_flag": g.get("ua_flag") == "1",
         "is_browser": bool(BROWSER_UA_RE.search(ua)),
         "is_tool": bool(TOOL_UA_RE.search(ua)),
@@ -360,6 +378,7 @@ class IPWindow:
         static = sum(1 for e in evs if e["is_static"])
         probe = sum(1 for e in evs if e["is_probe"])
         ua_flag = sum(1 for e in evs if e["ua_flag"])
+        oob = sum(1 for e in evs if e.get("is_oob"))
         browser = sum(1 for e in evs if e["is_browser"])
         tool = sum(1 for e in evs if e["is_tool"])
         referer = sum(1 for e in evs if e["has_ref"])
@@ -410,8 +429,11 @@ class IPWindow:
             "ua_flag_ratio": ua_flag / n,
             "multistage": multistage,
         }
-        # Hard signal: trust these regardless of the (possibly cold) model.
-        hard = bool(multistage) or ua_flag > 0 or (probe >= 2 and persistence > 0.5)
+        # Hard signal: trust these regardless of the (possibly cold) model. An
+        # OOB interaction callback is a single-request, high-confidence beacon
+        # (blind SSRF/RCE/XXE/SQLi verification) and is hard on its own.
+        hard = (bool(multistage) or ua_flag > 0 or oob > 0
+                or (probe >= 2 and persistence > 0.5))
         return x, stats, hard
 
 

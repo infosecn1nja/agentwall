@@ -33,7 +33,7 @@ AGENTWALL_E2E_VENV=/path/to/venv bash tests/e2e-real/run.sh
 Exit code 0 = every check passed. Logs and the served challenge pages are kept
 in the printed work directory (`$TMPDIR/agentwall-e2e.*`).
 
-## What it checks (64 assertions)
+## What it checks (72 assertions)
 
 | Group | Proves |
 |-------|--------|

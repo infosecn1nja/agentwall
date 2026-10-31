@@ -635,3 +635,51 @@ tail -f /var/log/nginx/agentwall_error.log | grep 'agentwall:'
 To exercise failure modes deliberately: stop Redis (expect fail-open 200s and
 rate-limited ERR lines), then start Redis with `requirepass` but unset
 `AGENTWALL_REDIS_PASS` (expect NOAUTH CRIT + fail-open).
+
+---
+
+## 9. Edge behavioural prevention (`agentwall_behavior_log.lua`)
+
+A second, independent Lua layer wired with `log_by_lua_file`. It gives the edge
+an immediate, model-free behavioural signal so an autonomous agent's *pattern*
+(not its User-Agent) is acted on within one short window — without waiting for
+the out-of-band scorer's warmup.
+
+Per request it classifies (pure string work, no sockets): an OOB interaction
+callback host in the URI/query/Referer (`is_oob_callback`), an injection/
+traversal probe payload (`is_probe_payload`, raw + URL-decoded), a 4xx error
+(excluding 429 and static-asset 404s), a 4xx on an auth path, and browser-header
+inconsistency (`browser_header_inconsistency`: a modern-Chrome/Firefox UA over
+HTTPS with no `Sec-Fetch-*` / `Accept-Language` / client hints). When any fires,
+it hands a detached `ngx.timer.at(0, …)` the facts; the timer (cosockets are
+disabled in the log phase itself) increments per-key fixed-window Redis counters
+and applies `behavior_decision`:
+
+| Signal in the window | Default threshold | Action |
+| --- | --- | --- |
+| OOB callback | `AGENTWALL_BEHAVIOR_OOB_BLOCK` = 1 | **block** |
+| probe payloads | `AGENTWALL_BEHAVIOR_PROBE_BLOCK` = 2 | **block** |
+| 4xx auth failures | `AGENTWALL_BEHAVIOR_AUTH_CHALLENGE` = 6 | **challenge** |
+| 4xx errors (incl. header-inconsistent) | `AGENTWALL_BEHAVIOR_ERR_CHALLENGE` = 20 | **challenge** |
+
+It writes the same `agentwall:block` / `agentwall:challenge` keys the scorer
+writes, which §Ordinary request flow enforces on the next request. It adds no
+response latency and fails open on any Redis hiccup.
+
+| Env var | Default | Notes |
+| --- | --- | --- |
+| `AGENTWALL_BEHAVIOR_MODE` | `mark` | `mark` = count + log would-be verdict, write nothing (shadow); `challenge` = enforce; `off` = disable |
+| `AGENTWALL_BEHAVIOR_WINDOW` | `60` | counter window seconds; clamped 5..3600 |
+| `AGENTWALL_BEHAVIOR_PROBE_BLOCK` | `2` | probe payloads in the window → block |
+| `AGENTWALL_BEHAVIOR_OOB_BLOCK` | `1` | OOB callbacks in the window → block |
+| `AGENTWALL_BEHAVIOR_ERR_CHALLENGE` | `20` | 4xx in the window → challenge; **tune for CGNAT** |
+| `AGENTWALL_BEHAVIOR_AUTH_CHALLENGE` | `6` | 4xx on auth paths → challenge |
+| `AGENTWALL_BEHAVIOR_HEADER_SUSPECT` | `0.60` | header-inconsistency score counted as one error |
+| `AGENTWALL_BEHAVIOR_BLOCK_TTL` | `1800` | TTL for behavioural blocks |
+| `AGENTWALL_OOB_EXTRA` | unset | comma list of extra collaborator domains to match |
+
+Honest limits: fixed-window counters are per edge worker's Redis view (shared,
+so correct across workers) but reset each window — a sufficiently slow
+distributed campaign stays under the thresholds (that is the scorer's and a
+SIEM's job). Behind CGNAT the 4xx/auth thresholds need raising. The OOB and
+probe signals are high-confidence and can be enforced first.

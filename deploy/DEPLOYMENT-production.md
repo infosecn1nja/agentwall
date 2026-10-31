@@ -157,7 +157,7 @@ Secrets belong in the environment, never in unit files or the repo:
 - [ ] `python benchmarks/fp_stress.py` → gate PASS (0 false blocks / 0 benign
       challenge failures on the adversarial-benign suite; synthetic).
 - [ ] Optional but recommended: `bash tests/e2e-real/run.sh` (Docker; real
-      403/challenge/headless + agent profiles against real Redis + OpenResty + the real scorer) → 64/64 PASS.
+      403/challenge/headless + agent profiles against real Redis + OpenResty + the real scorer) → 72/72 PASS.
 - [ ] **Upgrading?** Delete the old `/var/lib/agentwall/model.pkl` before
       starting this build: the learning policy changed (only human-like,
       non-hard events update HST/P99), and an old checkpoint may already have
@@ -203,6 +203,21 @@ Set `$agentwall_edge_enforce` to `1` in nginx.conf once the `ua_flag=1` /
 `fail2ban-regex /var/log/nginx/agentwall_access.log /etc/fail2ban/filter.d/agentwall-behavior.conf`
 shows no shared/CGNAT or office IPs among the would-be offenders (see §7 for
 their privilege caveat). Verify rollback (§4) before you need it.
+
+**Edge behavioural layer (`AGENTWALL_BEHAVIOR_MODE`).** The inline Lua layer
+(`agentwall_behavior_log.lua`) ships in `mark` (shadow): it logs would-be
+verdicts (`agentwall: behaviour … WOULD fire …`, reasons `oob-callback`,
+`probe-burst`, `error-burst`, `auth-burst`) and writes nothing. Review those
+WARN lines across the shadow cycle — the OOB and probe reasons are essentially
+never legitimate and can be enforced early, while the 4xx/auth burst thresholds
+(`AGENTWALL_BEHAVIOR_ERR_CHALLENGE` default 20 / `AGENTWALL_BEHAVIOR_AUTH_CHALLENGE`
+default 6 per `AGENTWALL_BEHAVIOR_WINDOW` = 60s) **must be tuned to your
+traffic, especially behind CGNAT/corporate NAT** where many users share a key.
+Then set `AGENTWALL_BEHAVIOR_MODE=challenge` to enforce. The verdicts it writes
+are the same `agentwall:block`/`agentwall:challenge` keys the scorer writes, so
+rollback is identical: `AGENTWALL_BEHAVIOR_MODE=mark` (or `off`) and reload, or
+`redis-cli` delete the keys. Add your own OOB collaborator domains via
+`AGENTWALL_OOB_EXTRA` (comma list).
 
 ### Phase 4 — automate response
 
@@ -421,6 +436,9 @@ degrades to "rate-limit + WAF + fail2ban only".
       HTTPS-only verified.
 - [ ] fail2ban (if used) runs least-privileged; `agentwall-ml` jail exists; the
       NNP-vs-sudo decision is recorded.
+- [ ] `AGENTWALL_BEHAVIOR_MODE=mark` observed during shadow; OOB/probe reasons
+      reviewed (safe to enforce), 4xx/auth burst thresholds tuned for CGNAT;
+      switched to `challenge` only after review.
 - [ ] `AGENTWALL_HEADLESS_MODE=mark` observed during shadow (edge + scorer); switch
       both to `block` for phase 3 and confirm `agentwall_headless_total` +
       `AgentWallHeadlessDetected` behave.

@@ -336,6 +336,51 @@ class ProductionSafetyDefaultsTests(unittest.TestCase):
         self.assertIn("create 0640 root adm", read("deploy/logrotate/agentwall"))
 
 
+class BehaviouralLayerTests(unittest.TestCase):
+    """The edge behavioural-prevention module and OOB signatures are wired and
+    ship in shadow (mark) mode."""
+
+    def test_behavior_module_exists_and_compiles(self):
+        path = ROOT / "nginx-lua/agentwall_behavior_log.lua"
+        self.assertTrue(path.is_file())
+        lua = shutil.which("lua") or shutil.which("lua5.1") or shutil.which("luajit")
+        if not lua:
+            self.skipTest("no lua interpreter")
+        result = subprocess.run([lua, "-e", 'assert(loadfile("{}"))'.format(path)],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_production_nginx_wires_the_log_phase_module(self):
+        text = read("deploy/nginx.conf.example")
+        self.assertIn("log_by_lua_file", text)
+        self.assertIn("agentwall_behavior_log.lua", text)
+
+    def test_behavior_mode_defaults_to_shadow(self):
+        # The Lua default must be mark (shadow); gen-secrets must not ship an
+        # enforcing default either.
+        lua = read("nginx-lua/agentwall_common.lua")
+        self.assertIn('M.DEFAULT_BEHAVIOR_MODE   = "mark"', lua)
+
+    def test_oob_markers_present_in_every_layer(self):
+        for rel, needles in (
+            ("nginx-lua/agentwall_common.lua", ("oast.fun", "burpcollaborator.net",
+                                                "dnslog.cn", "interact.sh")),
+            ("scorer/agentwall_scorer.py", ("oast", "burpcollaborator", "dnslog",
+                                            "interact\\.sh")),
+            ("deploy/nginx.conf.example", ("oast", "burpcollaborator", "interactsh")),
+        ):
+            text = read(rel)
+            for n in needles:
+                self.assertIn(n, text, "{} lacks {}".format(rel, n))
+
+    def test_e2e_exercises_the_behavioural_layer(self):
+        run = read("tests/e2e-real/run.sh")
+        self.assertIn("AGENTWALL_BEHAVIOR_MODE=challenge", run)
+        self.assertIn("Edge behavioural prevention", run)
+        for marker in ("G1", "G4", "G6"):
+            self.assertIn(marker, run)
+
+
 class EnvContractTests(unittest.TestCase):
     """A missing `env NAME;` silently makes Lua fall back to defaults (the
     headless mode default is `mark`, so enforcement would silently not happen)."""

@@ -91,6 +91,15 @@ env AGENTWALL_HEADLESS_BLOCK;
 env AGENTWALL_HEADLESS_SUSPECT;
 env AGENTWALL_MIN_SOLVE_MS;
 env AGENTWALL_GET_FALLBACK;
+env AGENTWALL_BEHAVIOR_MODE;
+env AGENTWALL_BEHAVIOR_WINDOW;
+env AGENTWALL_BEHAVIOR_PROBE_BLOCK;
+env AGENTWALL_BEHAVIOR_OOB_BLOCK;
+env AGENTWALL_BEHAVIOR_ERR_CHALLENGE;
+env AGENTWALL_BEHAVIOR_AUTH_CHALLENGE;
+env AGENTWALL_BEHAVIOR_HEADER_SUSPECT;
+env AGENTWALL_BEHAVIOR_BLOCK_TTL;
+env AGENTWALL_OOB_EXTRA;
 
 worker_processes 1;
 error_log ${WORK}/nginx/logs/error.log warn;
@@ -113,10 +122,18 @@ http {
         real_ip_recursive off;
 
         access_by_lua_file ${WORK}/lua/agentwall_challenge_block.lua;
+        log_by_lua_file ${WORK}/lua/agentwall_behavior_log.lua;
 
         location = /whoami {
             default_type text/plain;
             content_by_lua_block { ngx.say("remote_addr=" .. ngx.var.remote_addr) }
+        }
+        # TEST ONLY: echo an arbitrary status so the behavioural-layer test can
+        # drive 4xx bursts (e.g. GET /status/404).
+        location ~ "^/status/([0-9][0-9][0-9])$" {
+            content_by_lua_block {
+                ngx.status = tonumber(ngx.var[1]); ngx.say("status"); ngx.exit(ngx.status)
+            }
         }
         # NOTE: content_by_lua (not a rewrite-phase return) so the request
         # reaches the access phase; a rewrite-phase return would bypass Lua.
@@ -168,6 +185,10 @@ docker run -d --name agentwall-e2e-openresty --network agentwall-e2e-net \
     -e AGENTWALL_CHAL_TTL=300 -e AGENTWALL_CLR_TTL=300 \
     -e AGENTWALL_HEADLESS_MODE=block -e AGENTWALL_HEADLESS_TTL=300 -e AGENTWALL_MIN_SOLVE_MS=250 \
     -e AGENTWALL_GET_FALLBACK=on \
+    -e AGENTWALL_BEHAVIOR_MODE=challenge -e AGENTWALL_BEHAVIOR_WINDOW=60 \
+    -e AGENTWALL_BEHAVIOR_ERR_CHALLENGE=5 -e AGENTWALL_BEHAVIOR_AUTH_CHALLENGE=3 \
+    -e AGENTWALL_BEHAVIOR_PROBE_BLOCK=2 -e AGENTWALL_BEHAVIOR_OOB_BLOCK=1 \
+    -e AGENTWALL_BEHAVIOR_BLOCK_TTL=300 \
     -v "$WORK:$WORK" openresty/openresty:alpine \
     /usr/local/openresty/bin/openresty -g 'daemon off;' -c "$WORK/nginx/conf/nginx.conf" >/dev/null \
     || die "could not start OpenResty"
@@ -305,6 +326,8 @@ wpscan/3.8.25
 masscan/1.3
 zgrab/0.1
 httpx/1.6.0
+Mozilla/5.0 (compatible; CyberStrikeAI-WebShell/1.0)
+CyberStrikeAI/1.7.4
 AGENT_UAS
 
 echo
@@ -362,6 +385,43 @@ rdb set agentwall:headless:203.0.113.32 1 300 >/dev/null
 echo "203.0.113.32 - - [$(ts)] \"GET /next HTTP/1.1\" 404 12 \"-\" \"curl/8.4.0\" rt=0.001 urt=0.001 ua_flag=0 probe=1 xff=\"203.0.113.32\"" >> "$WORK/logs/agentwall_access.log"
 if wait_key agentwall:block:203.0.113.32 30; then ok "D10 scorer converted the headless marker into a hard block"; else bad "D10 scorer did not block the headless marker"; fi
 check 403 "$(code 203.0.113.32)" "D11 OpenResty enforces the headless block (403)"
+
+echo
+echo "=== G. Edge behavioural prevention (log phase, no scorer) ==="
+# These IPs never trigger the scorer (it is keyed on the access log, which this
+# origin does not write); only agentwall_behavior_log.lua acts, via the log
+# phase, writing the verdict the access script enforces on the NEXT request.
+
+# G1: an OOB interaction callback -> immediate behavioural block.
+curl -s -o /dev/null -H 'X-Forwarded-For: 203.0.113.60' \
+    "$URL/api/fetch?url=http://x.oast.fun/a"
+if wait_key agentwall:block:203.0.113.60 15; then ok "G1 OOB callback -> behavioural block key"; else bad "G1 no behavioural block for OOB callback"; fi
+check 403 "$(code 203.0.113.60)" "G2 OpenResty enforces the OOB behavioural block (403)"
+
+# G3: two probe payloads in the window -> behavioural block.
+curl -s -o /dev/null -H 'X-Forwarded-For: 203.0.113.61' "$URL/status/200?x=../../etc/passwd"
+curl -s -o /dev/null -H 'X-Forwarded-For: 203.0.113.61' "$URL/status/200?y=1%20union%20select%201"
+if wait_key agentwall:block:203.0.113.61 15; then ok "G3 probe burst -> behavioural block key"; else bad "G3 no behavioural block for probe burst"; fi
+
+# G4: an enumeration burst of 4xx (no tool UA, no probe) -> behavioural CHALLENGE.
+for i in $(seq 1 6); do
+    curl -s -o /dev/null -H 'X-Forwarded-For: 203.0.113.62' "$URL/status/404?n=$i"
+done
+if wait_key agentwall:challenge:203.0.113.62 15; then ok "G4 4xx enumeration burst -> behavioural challenge key"; else bad "G4 no behavioural challenge for 4xx burst"; fi
+check 429 "$(code 203.0.113.62)" "G5 OpenResty serves the behavioural challenge (429)"
+
+# G6: a normal browser doing normal 200s is NOT acted on (false-positive guard).
+for i in $(seq 1 8); do
+    curl -s -o /dev/null -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36' \
+        -H 'X-Forwarded-For: 203.0.113.63' -H 'Accept: text/html' -H 'Accept-Language: en-US' \
+        -H 'Sec-Fetch-Mode: navigate' -H 'Sec-Fetch-Site: none' "$URL/page$i"
+done
+"$PY" -c 'import time; time.sleep(1)'
+if [ "$(rdb exists agentwall:block:203.0.113.63)" = "0" ] && [ "$(rdb exists agentwall:challenge:203.0.113.63)" = "0" ]; then
+    ok "G6 normal browser 200 traffic not acted on by the behavioural layer"
+else
+    bad "G6 behavioural layer false-positived a normal browser"
+fi
 
 echo
 echo "=== E. OpenResty error log ==="
